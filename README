@@ -1,0 +1,31 @@
+//===============================================================================================//
+//===========================================//SOBRE//===========================================//
+//===============================================================================================//
+
+Fuego
+Código desenvolvido para o robô de Mini Sumô Fuego da TamanduTech
+Desenvolvido por Giovanni Rossi, 2026
+
+O código segue a estrutura:
+
+src
+|_ main.cpp           -> Arquivo principal
+
+include
+|_ defines.hpp        -> Definicoes globais
+|_ functions.hpp      -> Funcoes auxiliares
+|_ move.hpp           -> Funcoes de movivmentacao de motores
+|_ sensor_task.hpp    -> Funcoes de sensoreamento
+|_ auto_mode.hpp      -> Logica basica do modo AUTO
+|_ strategies.hpp     -> Estrategias iniciais do modo AUTO
+|_ combat.hpp         -> Loop pos estretegia inicial do modo AUTO
+|_ rc_mode.hpp        -> Interpretacao do controle de PS4 no modo RC
+
+Achou o repositório, né? Que bom ver vocês aqui!
+
+//=========================================//Workshop//==========================================//
+
+Foi realizado um workshop para explicar a estrutura logica basica dos codigos AUTO e RC que usamos
+no sumo. A gravacao, os slides e um codigo de exemplo podem ser encontrados no link abaixo
+
+https://drive.google.com/drive/folders/1rxQE-ccWV4NvQnA2Qr_AQARCJeVbv1AR?usp=sharing

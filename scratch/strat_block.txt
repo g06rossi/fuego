@@ -1,0 +1,114 @@
+//===============================================================================================//
+//======================================//NOMES DAS MACROS//=====================================//
+//===============================================================================================//
+
+#pragma region NOMES
+
+// Nomes na mesma ordem das tabelas TABELA_MACROS_ESQ / TABELA_MACROS_DIR (indice BT = posicao + 1)
+const char* const NOMES_MACROS[] = {
+    "Frentao",
+    "Frentao sem delay",
+    "Frentinho",
+    "Costas reto",
+    "Costas (lado)",
+    "Curvao",
+    "Curva",
+    "Curvinha",
+    "Em V",
+    "Em Vzinho",
+    "Em Vzao",
+    "Giro (180 graus)",
+    "Girinho (90 graus)",
+    "Foice"
+};
+
+#pragma endregion
+
+//===============================================================================================//
+//====================================//TESTES SENSOR MOTOR//====================================//
+//===============================================================================================//
+
+#pragma region TESTES
+
+// Teste de sensor: imprime a cada 50ms a leitura atual de todos os sensores do Fuego e espelha
+// nos LEDs enderecaveis (JS_E, IR_E, LDR, IR_D, JS_D)
+void testSensors() {
+    char linha[128];
+    for(;;) {
+        indicarSensoresTeste(value_JS_E, value_IR_E, value_LDR, value_IR_D, value_JS_D);
+
+        snprintf(linha, sizeof(linha),
+            "SENSORES -> IR_E:%d IR_D:%d | JS_E:%d JS_D:%d | QRE_E:%d QRE_D:%d | LDR:%d",
+            (int)value_IR_E, (int)value_IR_D, (int)value_JS_E, (int)value_JS_D,
+            (int)value_QRE_E, (int)value_QRE_D, (int)value_LDR);
+        Serial.println(linha);
+        SerialBT.println(linha);
+
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
+// Teste de motor
+void testMotors() {
+    for(;;) {
+        moverMotores(255, 255);
+        SerialBT.println("FRENTE");
+        Serial.println("FRENTE");
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        moverMotores(-255, 255);
+        SerialBT.println("ESQUERDA");
+        Serial.println("ESQUERDA");
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        moverMotores(255, -255);
+        SerialBT.println("DIREITA");
+        Serial.println("DIREITA");
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        moverMotores(-255, -255);
+        SerialBT.println("TRAS");
+        Serial.println("TRAS");
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        moverMotores(0, 0);
+        SerialBT.println("PARADO");
+        Serial.println("PARADO");
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+#pragma endregion
+
+//===============================================================================================//
+//===================================//SELECIONAR ESTRATEGIA//===================================//
+//===============================================================================================//
+
+#pragma region SELECIONAR
+
+// Executa a iniciacao escolhida nas etapas do BT (macro da tabela, personalizada ou nenhuma)
+void estrategiaLutaBT() {
+    const StrategyStep* sequencia = nullptr;
+
+    if (modoBT == MODO_PERSONALIZADA) {
+        SerialBT.println("//=====//ESTRATEGIA PERSONALIZADA INICIADA//=====//");
+        sequencia = customStrategy;
+
+    } else if (macroIndex > 0 && macroIndex <= NUM_MACROS) {
+        SerialBT.printf("//=====//%s INICIADO//=====//\n", NOMES_MACROS[macroIndex - 1]);
+        sequencia = (direction == direita ? TABELA_MACROS_DIR : TABELA_MACROS_ESQ)[macroIndex - 1];
+    }
+
+    if (sequencia != nullptr) {
+        executarEstrategia(sequencia);
+
+    } else {                                  // Iterativo puro (inicia somente modo iterativo)
+        SerialBT.println("//=====//ITERATIVO PURO INICIADO//=====//");
+        if (ladoAsa != asaLevantada) xTaskNotifyGive(openServoHandle);
+        if (modoFurtivo) xTaskNotifyGive(swSensorHandle);
+        moverMotores(0, 0);
+    }
+}
+
+#pragma endregion
+
