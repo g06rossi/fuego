@@ -15,8 +15,11 @@
 #include <boot_mode.hpp>                      // NVS do modo de boot e senha IR
 
 #define coefAtenuacao          1.8            // Atenuacao da velocidade em curvas (deve ser FLOAT)
-#define coefReverse            0.9            // Coeficiente para balancear a re (deve ser FLOAT)
-#define limiteCurva            154.0          // Velocidade limite em curvas puras (deve ser FLOAT)
+#define limiteCurva            188.0          // Velocidade limite em curvas puras (deve ser FLOAT)
+
+// Coeficientes para balancear a re de cada motor, em % (100 = 1.0, sem atenuacao). Configuraveis via NVS
+int coefReversoEsq             = 100;
+int coefReversoDir             = 100;
 
 volatile bool switchCxV        = false;       // Switch definido para controlar MACRO usado
 volatile bool velLimitada      = false;       // Switch definido pra limitar a velocidade do motor
@@ -37,7 +40,7 @@ const char* SMOKER             = "b0:cb:d8:04:6e:4c";
 const char* FUMACINHA          = "d4:e9:f4:e3:64:90";
 const char* ARRUELA            = "98:83:89:e8:11:75";
 const char* BRIGA              = "5c:01:3b:74:15:20";
-const char* FUEGO              = "d4:e9:f4:e3:64:90";
+const char* FUEGO              = "c8:85:41:2c:1e:90";
 const char* FUEGUITO           = "8c:4f:00:3d:27:00";
 const char* RESSACA            = "5c:96:66:c5:63:55";
 const char* SHENLONG           = "78:9b:3c:f6:29:fc";
@@ -248,8 +251,8 @@ void modoRC() {
                     velocidadeDireita = velocidade;
                 } else {                      // Gatilho esquerdo (re)
                     int velocidade = map(l2, zonaMorta, 255, 0, limiteVelocidade);
-                    velocidadeEsquerda = -velocidade;
-                    velocidadeDireita = - int(coefReverse * velocidade);
+                    velocidadeEsquerda = -velocidade * coefReversoEsq / 100;
+                    velocidadeDireita = -velocidade * coefReversoDir / 100;
                 }
 
 #pragma endregion

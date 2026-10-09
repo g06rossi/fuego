@@ -161,15 +161,15 @@ const OpeningStep vzaoDireita[] = {
 
 //===============================================//RECUO//============================================//
 
-#pragma region RECUO
+#pragma region GIRO
 
-const OpeningStep recuoEsquerda[] = {
-    {-255, -153,  180},
+const OpeningStep giroEsquerda[] = {
+    { -255, 255,  180},
     {   0,    0,    0}
 };
 
-const OpeningStep recuoDireita[] = {
-    {-153, -255,  180},
+const OpeningStep giroDireita[] = {
+    { 255, -255,  180},
     {   0,    0,    0}
 };
 
@@ -211,7 +211,7 @@ const OpeningStep* const TABELA_MACROS_ESQ[] = {
     emVEsquerda,        // 4
     vzinhoEsquerda,     // 5
     vzaoEsquerda,       // 6
-    recuoEsquerda,      // 7
+    giroEsquerda,       // 7
     desempateEsquerda,  // 8
     curvaBordaDummy     // 9
 };
@@ -224,7 +224,7 @@ const OpeningStep* const TABELA_MACROS_DIR[] = {
     emVDireita,         // 4
     vzinhoDireita,      // 5
     vzaoDireita,        // 6
-    recuoDireita,       // 7
+    giroDireita,        // 7
     desempateDireita,   // 8
     curvaBordaDummy     // 9
 };
@@ -248,7 +248,7 @@ const char* const NOMES_MACROS[] = {
     "Em V",
     "Vzinho",
     "Vzao",
-    "Recuo",
+    "Giro",
     "Desempate",
     "Curva de Borda"
 };
@@ -264,8 +264,8 @@ const char* const NOMES_MACROS[] = {
 // Executa as estrategias sequenciais e personalizadas
 void executarOpening(const OpeningStep strategySequence[]) {
     // Lida com haste quando necessario
-    if (estadoAsa == asaAberta) xTaskNotifyGive(openServoHandle);
-    xTaskNotifyGive(swSensorHandle);          // Entra no modo furtivo
+    if (abrirAsa) xTaskNotifyGive(openServoHandle);
+    definirJSumos(!furtivoIniciacao);
 
     // Loop de passos -> sai do loop quando o delay for igual a 0
     for (int i = 0; strategySequence[i].delayMs > 0; ++i) {
@@ -273,7 +273,7 @@ void executarOpening(const OpeningStep strategySequence[]) {
         vTaskDelay(pdMS_TO_TICKS(strategySequence[i].delayMs));
     }
 
-    if(!modoFurtivo) xTaskNotifyGive(swSensorHandle);          // Sai do modo furtivo
+    definirJSumos(!furtivoMovimentacao);
     // Para o robo ao final da execucao
     moverMotores(0, 0);
 }
@@ -286,21 +286,35 @@ void executarOpening(const OpeningStep strategySequence[]) {
 
 #pragma region TESTES
 
-// Teste de sensor: imprime a cada 50ms a leitura atual de todos os sensores do Fuego e espelha
-// nos LEDs enderecaveis (JS_E, IR_E, LDR, IR_D, JS_D)
+// Teste de sensor: imprime a cada 200ms a tabela de leitura de todos os sensores do Fuego
+// e espelha nos LEDs enderecaveis (JS_E, IR_E, LDR, IR_D, JS_D)
 void testSensors() {
-    char linha[128];
+    char tabela[512];
     for(;;) {
         indicarSensoresTeste(value_JS_E, value_IR_E, value_LDR, value_IR_D, value_JS_D);
 
-        snprintf(linha, sizeof(linha),
-            "SENSORES -> IR_E:%d IR_D:%d | JS_E:%d JS_D:%d | QRE_E:%d QRE_D:%d | LDR:%d",
-            (int)value_IR_E, (int)value_IR_D, (int)value_JS_E, (int)value_JS_D,
-            (int)value_QRE_E, (int)value_QRE_D, (int)value_LDR);
-        Serial.println(linha);
-        SerialBT.println(linha);
+        int pos = 0;
+        pos += snprintf(tabela + pos, sizeof(tabela) - pos,
+            "\n||==========||SENSORES||==========||\n"
+            "Pino | Sensor        | Leitura\n"
+            "-----|---------------|--------\n");
+        pos += snprintf(tabela + pos, sizeof(tabela) - pos, " %2d  | JSUMO_DIR_PIN | %d\n", JSUMO_DIR_PIN, (int)value_JS_D);
+        pos += snprintf(tabela + pos, sizeof(tabela) - pos, " %2d  | JSUMO_ESQ_PIN | %d\n", JSUMO_ESQ_PIN, (int)value_JS_E);
+        pos += snprintf(tabela + pos, sizeof(tabela) - pos, " %2d  | IR_DIR_PIN    | %d\n", IR_DIR_PIN, (int)value_IR_D);
+        pos += snprintf(tabela + pos, sizeof(tabela) - pos, " %2d  | IR_ESQ_PIN    | %d\n", IR_ESQ_PIN, (int)value_IR_E);
+        pos += snprintf(tabela + pos, sizeof(tabela) - pos, " %2d  | LINHA_DIR_PIN | %d (ADC %d / limiar %d)\n",
+            LINHA_DIR_PIN, (int)value_QRE_D, (int)adc_QRE_D, LINHA_TRESHOLD);
+        pos += snprintf(tabela + pos, sizeof(tabela) - pos, " %2d  | LINHA_ESQ_PIN | %d (ADC %d / limiar %d)\n",
+            LINHA_ESQ_PIN, (int)value_QRE_E, (int)adc_QRE_E, LINHA_TRESHOLD);
+        snprintf(tabela + pos, sizeof(tabela) - pos, " %2d  | LDR_PIN       | %d (ADC %d / limiar %d)\n"
+            "Ciclo ADC max: %lu us (limite %d)\n"
+            "||============================||", LDR_PIN, (int)value_LDR, (int)adc_LDR, LDR_TRESHOLD,
+            (unsigned long)adcCicloMaxUs, ADC_CICLO_LIMITE_US);
 
-        vTaskDelay(pdMS_TO_TICKS(50));
+        Serial.println(tabela);
+        SerialBT.println(tabela);
+
+        vTaskDelay(pdMS_TO_TICKS(200));
     }
 }
 
@@ -343,8 +357,8 @@ void testMotors() {
 #pragma region SELECIONAR
 
 void executarCurvaDeBorda() {
-    if (estadoAsa == asaAberta) xTaskNotifyGive(openServoHandle);
-    xTaskNotifyGive(swSensorHandle);          // Entra no modo furtivo
+    if (abrirAsa) xTaskNotifyGive(openServoHandle);
+    definirJSumos(!furtivoIniciacao);
 
     // Passo 1: Giro
     if (direction == esquerda) moverMotores(-230, 230);
@@ -353,8 +367,8 @@ void executarCurvaDeBorda() {
 
     // Passo 2: Avanco ate achar a linha (127 é o 50/100 de Fumacinha)
     moverMotores(127, 127);
-    while (viuLinha == linhaNADA) {
-        vTaskDelay(pdMS_TO_TICKS(5));
+    while (!value_QRE_E && !value_QRE_D) {
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 
     // Passo 3: Retorno
@@ -365,7 +379,7 @@ void executarCurvaDeBorda() {
     else moverMotores(-230, 230);
     vTaskDelay(pdMS_TO_TICKS(170));
 
-    if (!modoFurtivo) xTaskNotifyGive(swSensorHandle);          // Sai do modo furtivo
+    definirJSumos(!furtivoMovimentacao);
     moverMotores(0, 0);
 }
 
@@ -393,8 +407,8 @@ void openingsLutaBT() {
 
     } else {                                  // Iterativo puro (inicia somente modo iterativo)
         SerialBT.println("//=====//ITERATIVO PURO INICIADO//=====//");
-        if (estadoAsa == asaAberta) xTaskNotifyGive(openServoHandle);
-        if (modoFurtivo) xTaskNotifyGive(swSensorHandle);
+        if (abrirAsa) xTaskNotifyGive(openServoHandle);
+        definirJSumos(!furtivoMovimentacao);
         moverMotores(0, 0);
     }
 }

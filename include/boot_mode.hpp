@@ -12,6 +12,7 @@
 
 // Estado da senha de boot (4 5 6 + 7/8/9). O 4o digito escolhe o modo: 7 = IDLE, 8 = AUTO, 9 = RC
 int bootSenhaProgresso         = 0;           // Digitos corretos ja recebidos
+int bootSenhaUltimoDigito      = 0;           // Ultimo digito aceito (para ignorar repeticoes)
 bool bootSenhaFechada          = false;       // Senha completa: aguardando reinicio
 BootMode bootModoPendente      = BOOT_IDLE;   // Modo escolhido pela senha
 unsigned long bootSenhaFechadaMs = 0;         // Instante em que a senha fechou
@@ -57,6 +58,40 @@ void salvarBootMode(BootMode modo) {
     preferences.end();
 }
 
+void carregarPinConfig() {
+    if (!preferences.begin(NVS_NAMESPACE, true)) return;
+    for (int i = 0; i < NUM_PIN_CONFIG; i++) {
+        uint8_t val = preferences.getUChar(PIN_CONFIG[i].nvsKey, 0xFF);
+        if (val != 0xFF) *PIN_CONFIG[i].pino = val;
+    }
+    for (int i = 0; i < NUM_THRESHOLD_CONFIG; i++) {
+        int val = preferences.getInt(THRESHOLD_CONFIG[i].nvsKey, -1);
+        if (val >= 0) *THRESHOLD_CONFIG[i].valor = val;
+    }
+    preferences.end();
+    Serial.println("[BOOT] Configuracao (pinos e parametros) carregada da NVS.");
+}
+
+void salvarPinConfig() {
+    if (!preferences.begin(NVS_NAMESPACE, false)) {
+        Serial.println("[BOOT] ERRO: NVS indisponivel, pinos NAO gravados.");
+        return;
+    }
+    for (int i = 0; i < NUM_PIN_CONFIG; i++) {
+        if (*PIN_CONFIG[i].pino != PIN_CONFIG[i].padrao)
+            preferences.putUChar(PIN_CONFIG[i].nvsKey, *PIN_CONFIG[i].pino);
+        else
+            preferences.remove(PIN_CONFIG[i].nvsKey);
+    }
+    for (int i = 0; i < NUM_THRESHOLD_CONFIG; i++) {
+        if (*THRESHOLD_CONFIG[i].valor != THRESHOLD_CONFIG[i].padrao)
+            preferences.putInt(THRESHOLD_CONFIG[i].nvsKey, *THRESHOLD_CONFIG[i].valor);
+        else
+            preferences.remove(THRESHOLD_CONFIG[i].nvsKey);
+    }
+    preferences.end();
+}
+
 #pragma endregion
 
 //===============================================================================================//
@@ -78,6 +113,10 @@ bool bootSenhaFeed(int digito) {
     if (digito <= 0 || digito > 9) return false;
     if (bootSenhaFechada) return true;        // Engole tudo ate o reinicio
 
+    // O controle reenvia o comando enquanto o botao esta pressionado. A senha nao tem digitos
+    // iguais em sequencia, entao a repeticao do ultimo digito aceito e ignorada
+    if (bootSenhaProgresso > 0 && digito == bootSenhaUltimoDigito) return true;
+
     // Ultimo digito: escolhe o modo
     if (bootSenhaProgresso == BOOT_SENHA_TAMANHO - 1) {
         if (digito == 7) bootModoPendente = BOOT_IDLE;
@@ -98,6 +137,7 @@ bool bootSenhaFeed(int digito) {
         return true;
     }
 
+    bootSenhaUltimoDigito = digito;
     bootSenhaProgresso++;
     return true;
 }

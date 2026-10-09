@@ -56,9 +56,10 @@ void setMotors(int velocidadeEsquerdaMotor, int velocidadeDireitaMotor) {
 
     portEXIT_CRITICAL(&motorMux);             // Fim da estrutura critica
 
-    // Envia informacoes da movimentacao para debug via Bluetooth e Serial
+#if DEBUG_MOTORES
     SerialBT.printf("MOTOR -> D: %d E: %d\n", novaVD, novaVE);
     Serial.printf("MOTOR -> D: %d E: %d\n", novaVD, novaVE);
+#endif
 }
 
 #pragma endregion
@@ -117,8 +118,10 @@ void processarMovimento(int velocidadeEsquerdaMotor, int velocidadeDireitaMotor)
     // Caso (0, 0): aplica freio ativo
     if (velocidadeEsquerdaMotor == 0 && velocidadeDireitaMotor == 0) {
         brakeMotors();
+#if DEBUG_MOTORES
         SerialBT.println("FREIO");
         Serial.println("FREIO");
+#endif
 
     // Caso de troca de polaridade: zera PWM antes de inverter
     } else if (
@@ -194,10 +197,8 @@ da pelo delay entre a abertura e o relaxamento do servo
 void openServo(void *pvParameters) {
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        
-        estadoAsa = asaAberta;
-        
-        ledc_set_duty(LEDC_LOW_SPEED_MODE, SERVO_LEDC_CHANNEL, angleToDuty(180));
+
+        ledc_set_duty(LEDC_LOW_SPEED_MODE, SERVO_LEDC_CHANNEL, angleToDuty(SERVO_ANGULO_ABERTO));
         ledc_update_duty(LEDC_LOW_SPEED_MODE, SERVO_LEDC_CHANNEL);
 
         vTaskDelay(pdMS_TO_TICKS(150));       // Tempo para garantir mov 90 graus. Datasheet -> 150ms
@@ -212,10 +213,8 @@ void closeServo(void *pvParameters) {
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-        estadoAsa = asaFechada;
-
         // Fecha o servo
-        ledc_set_duty(LEDC_LOW_SPEED_MODE, SERVO_LEDC_CHANNEL, angleToDuty(90));
+        ledc_set_duty(LEDC_LOW_SPEED_MODE, SERVO_LEDC_CHANNEL, angleToDuty(SERVO_ANGULO_FECHADO));
         ledc_update_duty(LEDC_LOW_SPEED_MODE, SERVO_LEDC_CHANNEL);
 
         vTaskDelay(pdMS_TO_TICKS(150));       // Tempo para garantir mov 90 graus. Datasheet -> 150ms

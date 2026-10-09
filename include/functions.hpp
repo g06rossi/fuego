@@ -33,6 +33,12 @@ void delayUs(uint32_t us) {
 
 #pragma region SINAL DIGITAL
 
+// Leitura direta de GPIO para uso em ISR (suporta pinos 0-39)
+static inline bool IRAM_ATTR lerGPIO(uint8_t pino) {
+    if (pino < 32) return (GPIO.in >> pino) & 0x1;
+    return (GPIO.in1.val >> (pino - 32)) & 0x1;
+}
+
 // Funcao para definir um pino como HIGH
 void directWriteHigh(int pin) {
     if (pin < 32)
@@ -47,6 +53,16 @@ void directWriteLow(int pin) {
         GPIO.out_w1tc = ((uint32_t)1 << pin);
     else if (pin < 64)
         GPIO.out1_w1tc.val = ((uint32_t)1 << (pin - 32));
+}
+
+bool gndLigado = true;                        // Estado do NMOS que conecta o GND dos JSumos
+
+// Define o estado dos JSumos de forma absoluta. A notificacao do switchSensor so alterna e
+// perde notificacoes seguidas (ulTaskNotifyTake com pdTRUE zera a contagem)
+void definirJSumos(bool ligado) {
+    if (ligado) directWriteHigh(NMOS_PIN);
+    else directWriteLow(NMOS_PIN);
+    gndLigado = ligado;
 }
 
 #pragma endregion

@@ -16,6 +16,7 @@
 
 #include "soc/gpio_struct.h"                   // DOIS | Acesso direto e rapido aos pinos GPIO
 #include "driver/ledc.h"                       // DOIS | Controle do periferico de PWM por hardware
+#include "driver/adc.h"                        // DOIS | Leitura direta do ADC1 (linha e LDR)
 
 #pragma endregion
 
@@ -38,6 +39,7 @@ TaskHandle_t openingsHandle   = NULL;        //  AUTO | Handle da task da estrat
 TaskHandle_t stopRobotHandle   = NULL;        //  AUTO | Handle da task de desligar robo
 TaskHandle_t IRCommandHandle   = NULL;        //  AUTO | Handle da task de interpretar IR
 TaskHandle_t swSensorHandle    = NULL;        //  AUTO | Handle da task pra desligar sensor
+TaskHandle_t analogSensorHandle = NULL;       //  DOIS | Handle da task de leitura de linha e LDR
 
 QueueHandle_t btQueue;                        //  AUTO | Handle da fila do BT
 
@@ -114,10 +116,11 @@ VAMPETA       18     19     17     16
 */
 
 // Esquerdo invertido na última montagem (sem termo azul)
-#define LEFT_POS_PIN           19             //  DOIS | Ponte H M1 A_IN_2 ESP32 IO18
-#define LEFT_NEG_PIN           18             //  DOIS | Ponte H M1 A_IN_1 ESP32 IO19
-#define RIGHT_POS_PIN          16             //  DOIS | Ponte H M2 B_IN_2 ESP32 IO16
-#define RIGHT_NEG_PIN          17             //  DOIS | Ponte H M2 B_IN_1 ESP32 IO17
+// Configuraveis via NVS (modo Configuracao no BT)
+uint8_t LEFT_POS_PIN           = 19;          //  DOIS | Ponte H M1 A_IN_2 ESP32 IO18
+uint8_t LEFT_NEG_PIN           = 18;          //  DOIS | Ponte H M1 A_IN_1 ESP32 IO19
+uint8_t RIGHT_POS_PIN          = 16;          //  DOIS | Ponte H M2 B_IN_2 ESP32 IO16
+uint8_t RIGHT_NEG_PIN          = 17;          //  DOIS | Ponte H M2 B_IN_1 ESP32 IO17
 
 #define LEFT_POS_CHANNEL       LEDC_CHANNEL_6 //  DOIS | Canal PWM positivo esquerdo
 #define LEFT_NEG_CHANNEL       LEDC_CHANNEL_7 //  DOIS | Canal PWM negativo esquerdo
@@ -129,13 +132,17 @@ VAMPETA       18     19     17     16
 #define PWM_RESOLUTION         8              //  DOIS | Resolucao de 8 bits
 #define PWM_ZERO_DELAY         30             //  DOIS | Tempo para Ponte H limpar PWM (µs)
 
+// 1 = imprime cada comando de motor no Serial/BT. Desligado por padrao: o SerialBT pode bloquear
+// quando o buffer enche e atrasar o combate
+#define DEBUG_MOTORES          0
+
 #pragma endregion
 
 //========================================//Servomotor//========================================//
 
 #pragma region PINOS SERVO
 
-#define SERVOMOTOR_PIN         32              //  DOIS | Servomotor da haste ESP32 porta 23
+uint8_t SERVOMOTOR_PIN         = 32;          //  DOIS | Servomotor da haste ESP32 porta 23
 
 #define SERVO_LEDC_CHANNEL     LEDC_CHANNEL_0 //  DOIS | Canal do PWM do servo
 #define SERVO_TIMER            LEDC_TIMER_0   //  DOIS | Timer do PWM do servo
@@ -145,6 +152,9 @@ VAMPETA       18     19     17     16
 #define SERVO_MIN_PULSE_US     544            //  DOIS | Largura de pulso para 0 graus (µs)
 #define SERVO_MAX_PULSE_US     2400           //  DOIS | Largura de pulso para 180 graus (µs)
 
+int SERVO_ANGULO_ABERTO        = 180;         //  DOIS | Angulo da asa aberta (configuravel via NVS)
+int SERVO_ANGULO_FECHADO       = 90;          //  DOIS | Angulo da asa fechada (configuravel via NVS)
+
 #pragma endregion
 
 //========================================//Comunicacao//========================================//
@@ -152,21 +162,21 @@ VAMPETA       18     19     17     16
 #pragma region COMUNICACAO
 
 #define LED_PIN                2              //  DOIS | LED padrao ESP32 IO2
-#define IR_RECIEVE_PIN         13              //  DOIS | Sensor IR ESP32 IO13
+#define IR_RECIEVE_PIN         13             //  DOIS | Sensor IR ESP32 IO13
 
 #define LEDS_ENDERECAVEIS_PIN  33             //  DOIS | LEDs enderecaveis ESP32 IO33
 #define NUM_LEDS               5              //  DOIS | Numero de LEDs enderecaveis
 
 #define MAX_STEPS              20             //  AUTO | Numero maximo de passos da estrategia z
 #define BT_BUFFER_SIZE         64             //  AUTO | Tamanho buffer de comandos personalizados
-#define BT_QUEUE_LENGTH        128            //  AUTO | Tamanho dda fila de BT
+#define BT_QUEUE_LENGTH        128            //  AUTO | Tamanho da fila de BT
 #define BT_NUM_TIMEOUT_MS      600            //  AUTO | Tempo sem digitos para validar o indice recebido
 
 #define NVS_NAMESPACE          "fuego_cfg"    //  DOIS | Namespace da NVS
 #define NVS_KEY_BOOT           "boot"         //  DOIS | Chave do modo de boot (IDLE/RC/AUTO)
 #define BOOT_SENHA_TAMANHO     4              //  DOIS | Digitos da senha IR (3 de prefixo + 1 de modo)
 #define BOOT_SENHA_CONFIRMA_MS 2000           //  DOIS | Tempo mostrando o modo escolhido antes de reiniciar
-#define FINAL_TEMPO_MS         4000           //  AUTO | Tempo da finalizacao por tempo (ms)
+#define FINAL_TEMPO_MS         4000           //  AUTO | Tempo sugerido da finalizacao por tempo (ms)
 
 #pragma endregion
 
@@ -174,20 +184,20 @@ VAMPETA       18     19     17     16
 
 #pragma region SENSOREAMENTO
 
-#define NMOS_PIN  25                          //  AUTO | NMOS que desconecta o GND dos sensores
+uint8_t NMOS_PIN               = 25;          //  AUTO | NMOS que desconecta o GND dos sensores
 
-#define JSUMO_DIR_PIN          14             //  AUTO | JSumo direito ESP32 IO14
-#define JSUMO_ESQ_PIN          23             //  AUTO | JSumo esquerdo ESP32 IO23
+uint8_t JSUMO_DIR_PIN          = 14;          //  AUTO | JSumo direito
+uint8_t JSUMO_ESQ_PIN          = 23;          //  AUTO | JSumo esquerdo
 
-#define IR_DIR_PIN             4              //  AUTO | Sensor IR direito ESP32 IO4
-#define IR_ESQ_PIN             5              //  AUTO | Sensor IR esquerdo ESP32 IO5
+uint8_t IR_DIR_PIN             = 4;           //  AUTO | Sensor IR direito (ativo em LOW)
+uint8_t IR_ESQ_PIN             = 5;           //  AUTO | Sensor IR esquerdo (ativo em LOW)
 
-#define LINHA_DIR_PIN          34
-#define LINHA_ESQ_PIN          39
-#define LINHA_TRESHOLD         3800
+uint8_t LINHA_DIR_PIN          = 34;          //  AUTO | Sensor Linha direito
+uint8_t LINHA_ESQ_PIN          = 39;          //  AUTO | Sensor Linha esquerdo
+int LINHA_TRESHOLD             = 3800;        //  AUTO | ADC abaixo disso = linha branca
 
-#define LDR_PIN                36
-#define LDR_TRESHOLD           200
+uint8_t LDR_PIN                = 36;          //  AUTO | Sensor LDR
+int LDR_TRESHOLD               = 200;         //  AUTO | ADC filtrado abaixo disso = adversario na rampa
 
 #pragma endregion
 
@@ -195,27 +205,37 @@ VAMPETA       18     19     17     16
 //BRIEL ESTEVE AQUI
 #pragma region VARIAVEIS
 
-volatile bool value_JS_E      = false;       //  AUTO | Definicao do Jsumo Esquerdo
-volatile bool value_JS_D      = false;       //  AUTO | Definicao do Jsumo Direito
-volatile bool value_IR_E      = false;       //  AUTO | Definicao do IR Esquerdo
-volatile bool value_IR_D      = false;       //  AUTO | Definicao do IR Direito
+volatile bool value_JS_E       = false;       //  AUTO | Definicao do Jsumo Esquerdo
+volatile bool value_JS_D       = false;       //  AUTO | Definicao do Jsumo Direito
+volatile bool value_IR_E       = false;       //  AUTO | Definicao do IR Esquerdo
+volatile bool value_IR_D       = false;       //  AUTO | Definicao do IR Direito
 
-volatile int value_QRE_E      = 0;           //  AUTO | Definicao do Linha Esquerdo
-volatile int value_QRE_D      = 0;           //  AUTO | Definicao do Linha Direito
-volatile int value_LDR        = 0;           //  AUTO | Definicao do LDR
+volatile int value_QRE_E       = 0;           //  AUTO | Linha Esquerdo (1 = linha branca)
+volatile int value_QRE_D       = 0;           //  AUTO | Linha Direito (1 = linha branca)
+volatile int value_LDR         = 0;           //  AUTO | LDR (1 = sombra do adversario na rampa)
+
+volatile int adc_QRE_E         = 0;           //  AUTO | ADC cru do Linha Esquerdo (0-4095)
+volatile int adc_QRE_D         = 0;           //  AUTO | ADC cru do Linha Direito (0-4095)
+volatile int adc_LDR           = 0;           //  AUTO | ADC do LDR apos a media movel (0-4095)
+
+#define LDR_JANELA_FILTRO      8              //  AUTO | Amostras da media movel do LDR
+#define ADC_CICLO_LIMITE_US    200            //  DOIS | Ciclo de ADC mais longo que isso cede 1 ms ao nucleo 0
+
+volatile uint32_t adcCicloMaxUs = 0;          //  DOIS | Maior duracao medida de um ciclo de ADC (us)
 
 bool inicializado              = false;       //  DOIS | Flag para validar a inicializacao 
 bool running                   = false;       //  AUTO | Indica se o robo esta lutando
 bool ready                     = false;       //  AUTO | Usada para testar se o robo recebe IR
 bool seeing                    = false;       //  AUTO | Usada para indicar se o robo ve o outro
-bool modoFurtivo               = false;       //  AUTO | Usada para indicar se deve desligar Jsumo
+bool furtivoIniciacao          = false;       //  AUTO | JSumos desligados durante a iniciacao
+bool furtivoMovimentacao       = false;       //  AUTO | JSumos desligados durante a movimentacao
 
-unsigned long tempoFighting      = 0;           //  AUTO | Inicio do combate
+unsigned long tempoFighting    = 0;           //  AUTO | Inicio do combate
 
 volatile int novaVE            = 0;           //  DOIS | Velocidade pra atualizar o motor esquerdo
 volatile int novaVD            = 0;           //  DOIS | Velocidade pra atualizar o motor direito
 
-int customOpeningCount        = 0;           //  AUTO | Contagem de passos da estrategia personalizada
+int customOpeningCount         = 0;           //  AUTO | Contagem de passos da estrategia personalizada
 int bufferIndex                = 0;           //  AUTO | Indice para controlar a posicao no buffer
 
 int macroIndex                 = 0;           //  AUTO | Iniciacao escolhida (0 = nenhuma, N = macro N-1)
@@ -234,21 +254,33 @@ enum BootMode {                               //  DOIS | Modo de inicializacao d
 };
 
 enum ConfigStage {                            //  AUTO | Etapas de selecao BT (na ordem do fluxo)
-   STAGE_MODE,                                // Modo: luta, teste sensor, teste motor, personalizada
-   STAGE_CUSTOM_OPENING,                        // Passos da estrategia personalizada (so modo 3)
-   STAGE_FURTIVE,                             // Modo furtivo
-   STAGE_DIRECTION,                           // Direcao da estrategia
+   STAGE_MODE,                                // Modo: luta, teste sensor, teste motor, personalizada, configuracao
+   STAGE_ADVERSARY,                           // Tipo de adversario
+   STAGE_WING,                                // Asa aberta ou fechada na luta
+   STAGE_CUSTOM_OPENING,                      // Passos da estrategia personalizada (substitui a iniciacao)
    STAGE_INITIATION,                          // Macro de iniciacao
+   STAGE_DIRECTION,                           // Direcao da estrategia
+   STAGE_FURTIVE,                             // Modo furtivo da iniciacao
    STAGE_MOVEMENT,                            // Estrategia iterativa de movimentacao
-   STAGE_FINALIZATION,                        // Finalizacao (LDR ou tempo) -> ultima etapa
+   STAGE_FURTIVE_MOVEMENT,                    // Modo furtivo da movimentacao
+   STAGE_FINALIZATION,                        // Finalizacao (LDR ou tempo)
+   STAGE_FINAL_TIME,                          // Tempo da finalizacao (so com finalizacao por tempo)
    STAGE_DONE
+};
+
+enum TipoAdversario {                         //  AUTO | Tipo do adversario da luta
+   advRampaComIR,
+   advRampaSemIR,
+   advAsaSemEmissor,
+   advAsaComEmissor
 };
 
 enum ModoBT {                                 //  AUTO | Opcoes da etapa de modo
    MODO_LUTA,
    MODO_TESTE_SENSOR,
    MODO_TESTE_MOTOR,
-   MODO_PERSONALIZADA
+   MODO_PERSONALIZADA,
+   MODO_CONFIGURACAO
 };
 
 enum FinalizationMode {                       //  AUTO | Finalizacao da estrategia
@@ -277,11 +309,6 @@ enum DirecaoAdversario {                      //  AUTO | Direcao de movimentacao
    nuncaVisto
 };
 
-enum AsaEstado {                              //  AUTO | Estado da asa do robo
-   asaFechada,
-   asaAberta
-};
-
 enum ViuLinha {
    linhaNADA,
    linhaESQ,
@@ -298,15 +325,71 @@ struct OpeningStep {                         //  AUTO | Struct para os comandos 
 BootMode currentBootMode       = BOOT_IDLE;
 ConfigStage currentStage       = STAGE_MODE;
 ModoBT modoBT                  = MODO_LUTA;
+TipoAdversario tipoAdversario  = advRampaComIR;
 FinalizationMode finalization  = FIM_LDR;
+unsigned long tempoFinalizacaoMs = FINAL_TEMPO_MS; // Escolhido no BT na finalizacao por tempo
 
 ModoLuta modoLuta              = buscaOfensiva;
 ModoLuta modoLutaOriginal      = buscaOfensiva;
 Direction direction            = esquerda;
 DirecaoAdversario ultimoLado   = nuncaVisto;
-AsaEstado estadoAsa            = asaFechada;
+bool abrirAsa                  = false;       //  AUTO | Abre a asa no inicio da iniciacao (etapa ASA)
 ViuLinha viuLinha              = linhaNADA;
 OpeningStep customOpening    [MAX_STEPS];
+
+#pragma endregion
+
+//=====================================//Tabela de Pinos//======================================//
+
+#pragma region TABELA PINOS
+
+struct PinConfigEntry {
+   const char* nome;
+   uint8_t* pino;
+   const char* nvsKey;
+   uint8_t padrao;
+};
+
+const PinConfigEntry PIN_CONFIG[] = {
+   {"Motor Esq (+)",    &LEFT_POS_PIN,    "p_lp", 19},
+   {"Motor Esq (-)",    &LEFT_NEG_PIN,    "p_ln", 18},
+   {"Motor Dir (+)",    &RIGHT_POS_PIN,   "p_rp", 16},
+   {"Motor Dir (-)",    &RIGHT_NEG_PIN,   "p_rn", 17},
+   {"Servomotor",       &SERVOMOTOR_PIN,  "p_sv", 32},
+   {"NMOS (GND sens.)", &NMOS_PIN,        "p_nm", 25},
+   {"JSumo Direito",    &JSUMO_DIR_PIN,   "p_jd", 14},
+   {"JSumo Esquerdo",   &JSUMO_ESQ_PIN,   "p_je", 23},
+   {"IR Direito",       &IR_DIR_PIN,      "p_id",  4},
+   {"IR Esquerdo",      &IR_ESQ_PIN,      "p_ie",  5},
+   {"Linha Direito",    &LINHA_DIR_PIN,   "p_ld", 34},
+   {"Linha Esquerdo",   &LINHA_ESQ_PIN,   "p_le", 39},
+   {"LDR",              &LDR_PIN,         "p_lr", 36},
+};
+const int NUM_PIN_CONFIG = sizeof(PIN_CONFIG) / sizeof(PIN_CONFIG[0]);
+
+struct ThresholdConfigEntry {
+   const char* nome;
+   int* valor;
+   const char* nvsKey;
+   int padrao;
+   int maximo;
+};
+
+// Definidos junto do codigo que os usa (fighting.hpp e rc_mode.hpp)
+extern int velBuscaLinhaCruzeiro;
+extern int coefReversoEsq;
+extern int coefReversoDir;
+
+const ThresholdConfigEntry THRESHOLD_CONFIG[] = {
+   {"Limiar Linha (QRE)", &LINHA_TRESHOLD,       "t_li", 3800, 4095},
+   {"Limiar LDR",         &LDR_TRESHOLD,         "t_lr",  200, 4095},
+   {"Servo Aberto (graus)",  &SERVO_ANGULO_ABERTO,  "t_sa",  180,  180},
+   {"Servo Fechado (graus)", &SERVO_ANGULO_FECHADO, "t_sf",   90,  180},
+   {"Vel. Busca Linha",      &velBuscaLinhaCruzeiro, "t_vl",  140,  255},
+   {"Coef. Re RC Esq (%)",   &coefReversoEsq,        "t_ce",  100,  100},
+   {"Coef. Re RC Dir (%)",   &coefReversoDir,        "t_cd",  100,  100},
+};
+const int NUM_THRESHOLD_CONFIG = sizeof(THRESHOLD_CONFIG) / sizeof(THRESHOLD_CONFIG[0]);
 
 #pragma endregion
 

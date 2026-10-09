@@ -25,8 +25,7 @@
       ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⡇⠀⢀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
     ⠀⠀  ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠘⢷⣴⡿⣷⠀⠀⢰⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
     ⠀⠀⠀⠀  ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠴⡿⣟⣿⣿⣶⡶⠋⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀                                                                                                             
-                                                                  
-                                                                                 
+                                                                                                     
                     ##### ##                                                     
                  ######  /### /                                                  
                 /#   /  /  ##/                                                   
@@ -75,7 +74,8 @@
 
 void setup() {
     Serial.begin(115200);                     // Comunicacao serial com baudrate 115200
-    
+    carregarPinConfig();                      // Carrega pinos/thresholds da NVS antes de usar
+
     // Configura os pinos do ESP
     pinMode(NMOS_PIN, OUTPUT);
     directWriteHigh(NMOS_PIN);                // Transistor e JSumos ligados
@@ -98,7 +98,6 @@ void setup() {
     // LEDs enderecaveis
     setupLeds();                              // Configura os LEDs enderecaveis
     validaSetup(0,0,0,0,0);                   // 5 vermelhos e 0 verdes
-    blinkLED(5, 25);
     vTaskDelay(pdMS_TO_TICKS(100));           // Pequeno atraso para protecao
 
     currentBootMode = carregarBootMode();     // Modo gravado na NVS (IDLE se nao houver)
@@ -109,7 +108,6 @@ void setup() {
     printActiveIRProtocols(&Serial);
     Serial.println("\n\n//=====//Setup IR feita//=====//");
     validaSetup(1,0,0,0,0);                   // 4 vermelhos e 1 verde
-    blinkLED(5, 25);
 
 //================================//Criacao da tarefa nos nucleos//==============================//
 
@@ -117,17 +115,17 @@ void setup() {
     Serial.println("//=====//Setup sensor feita//=====//");
     vTaskDelay(pdMS_TO_TICKS(100));           // Pequeno atraso para protecao
     validaSetup(1,1,0,0,0);                   // 3 vermelhos e 2 verdes
-    blinkLED(5, 25);
 
     setupMoveTask();                          // Configura as tarefas de motores
     Serial.println("//=====//Setup motor feita//=====//");
     xTaskNotifyGive(closeServoHandle);
     vTaskDelay(pdMS_TO_TICKS(100));           // Pequeno atraso para protecao
     validaSetup(1,1,1,0,0);                   // 2 vermelhos e 3 verdes
-    blinkLED(5, 25);
     vTaskDelay(pdMS_TO_TICKS(100));           // Pequeno atraso para protecao
-    validaSetup(1,1,1,1,0);                   // 2 vermelhos e 3 verdes
-    blinkLED(5, 25);
+    validaSetup(1,1,1,1,0);                   // 1 vermelho e 4 verdes
+    vTaskDelay(pdMS_TO_TICKS(100));           // Pequeno atraso para protecao
+
+    validaSetup(1,1,1,1,1);                   // 5 verdes: setup completo
     vTaskDelay(pdMS_TO_TICKS(100));           // Pequeno atraso para protecao
 }
 
@@ -153,11 +151,9 @@ void __init__() {
                 ultimoComandoIR = 0xFFFF;
 
                 if (comandoAtual == 0x7) {    // Inicia modo AUTO se recebe 8 (0x7) do controle
-                    blinkLED(8, 25);          // Validacao por LED
                     currentBootMode = BOOT_AUTO;
 
                 } else if (comandoAtual == 0x8) { // Inicia modo RC se recebe 9 (0x8) do controle
-                    blinkLED(6, 40);          // Validacao por LED
                     currentBootMode = BOOT_RC;
                 }
             }
