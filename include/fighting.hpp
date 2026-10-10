@@ -18,20 +18,23 @@ void modoDesengate();
 
 // Velocidades em PWM (0-255) e tempos em ms
 
+// Sensor de linha
+int LINHA_TRESHOLD                        = 3800;  // ADC abaixo disso = linha branca (configuravel via NVS)
+
 // Leitura do adversario (giros iguais em todas as buscas)
 const int velGiroRoda                     = 255;   // Roda externa no giro em torno da roda (interna parada)
-const int velGiroEixo                     = 153;   // Giro no proprio eixo
+const int velGiroEixo                     = 192;   // Giro no proprio eixo
 const unsigned long flancoTimeoutMs       = 7000;  // Duracao maxima da manobra de flanco da Asa Com IR
 
 // Busca Ofensiva
 const int velOfensivaFrente               = 255;   // Adversario a frente
 
 // Busca Defensiva
-const int velDefensivaFrente              = 51;    // Adversario a frente
+const int velDefensivaFrente              = 70;    // Adversario a frente
 const unsigned long defensivaEscalaMs     = 10000; // Sem tocar a linha -> vira Busca Linha de vez
 
 // Busca Linha
-int velBuscaLinhaCruzeiro                 = 140;   // Avanco normal (configuravel via NVS)
+int velBuscaLinhaCruzeiro                 = 60;   // Avanco normal (configuravel via NVS)
 const int velBuscaLinhaArrancada          = 255;   // Arrancada de desencalhe
 const unsigned long arrancadaIntervaloMs  = 4000;  // Sem linha -> dispara arrancada
 const unsigned long arrancadaDuracaoMs    = 90;
@@ -40,23 +43,23 @@ const unsigned long cargaTotalMs          = 7000;  // Sem tocar a linha -> carga
 
 // Busca Pulsada
 const int velPulso                        = 255;
-const unsigned long pulsoDuracaoMs        = 60;
-const unsigned long pulsoEsperaMs         = 1000;  // Parado entre os pulsos
-const unsigned long pulsoQuantidade       = 4;
+const unsigned long pulsoDuracaoMs        = 80;
+const unsigned long pulsoEsperaMs         = 800;  // Parado entre os pulsos
+const unsigned long pulsoQuantidade       = 6;
 
 // Retorno (linha detectada)
 const int velRetornoRecuo                 = 255;
 const int velRetornoGiro                  = 255;
-const unsigned long retornoRecuoLateralMs = 125;   // Linha vista por 1 sensor
-const unsigned long retornoGiroLateralMs  = 120;
-const unsigned long retornoRecuoFrontalMs = 150;   // Linha vista pelos 2 sensores
-const unsigned long retornoGiroFrontalMs  = 175;
+int retornoRecuoLateralMs                 = 200;   // Linha vista por 1 sensor (configuravel via NVS)
+int retornoGiroLateralMs                  = 160;   // (configuravel via NVS)
+int retornoRecuoFrontalMs                 = 250;   // Linha vista pelos 2 sensores (configuravel via NVS)
+int retornoGiroFrontalMs                  = 225;   // (configuravel via NVS)
 
 // Desengate (LDR apagou apos ataque): varredura em S
 const int velDesengateInterna             = 140;   // Roda interna da curva
 const int velDesengateExterna             = 255;   // Roda externa da curva
-const unsigned long desengateIdaMs        = 50;    // Curva para a esquerda
-const unsigned long desengateVoltaMs      = 100;   // Curva para a direita
+const unsigned long desengateIdaMs        = 80;    // Curva para a esquerda
+const unsigned long desengateVoltaMs      = 140;   // Curva para a direita
 
 enum EstadoFlanco {                           // FSM de leitura da Asa Com IR
     flancoInativo,

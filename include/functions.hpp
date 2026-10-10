@@ -134,21 +134,9 @@ void validaSetup(uint8_t s0, uint8_t s1, uint8_t s2, uint8_t s3, uint8_t s4) {
     FastLED.show();
 }
 
-// Funcao para indicar o status dos sensores JSumo (esquerda, frente, direita) usando LEDs
-void indicarSensores(bool esquerda, bool frente, bool direita) {
-    leds[0] = CRGB::Black;                    // LED 1 apagado
-    leds[4] = CRGB::Black;                    // LED 5 apagado
-
-    // Decide entre roxo (128, 0, 128) se 1 ou laranja (200, 128, 0) se 0
-    leds[1] = esquerda ? CRGB(128, 0, 128) : CRGB(200, 128, 0);  
-    leds[2] = frente   ? CRGB(128, 0, 128) : CRGB(200, 128, 0);  
-    leds[3] = direita  ? CRGB(128, 0, 128) : CRGB(200, 128, 0); 
-
-    FastLED.show();
-}
-
-// Painel dos testes de sensor: os 5 LEDs mostram JS_E, IR_E, LDR, IR_D e JS_D (roxo = enxerga)
-void indicarSensoresTeste(bool jsE, bool irE, bool ldr, bool irD, bool jsD) {
+// Painel de sensores na ordem fisica do robo: JS_E, IR_E, LDR, IR_D e JS_D (roxo = enxerga,
+// laranja = nada). Usado na selecao BT e no teste de sensor
+void indicarSensores(bool jsE, bool irE, bool ldr, bool irD, bool jsD) {
     const CRGB enxerga = CRGB(128, 0, 128);
     const CRGB nada    = CRGB(200, 128, 0);
 
@@ -188,12 +176,14 @@ void ledsModo(BootMode modo) {
     FastLED.show();
 }
 
-// Progresso da senha de boot: um LED roxo por digito correto (a partir do LED 2) e, com a senha
-// fechada, o LED 1 assume a cor do modo escolhido
+// Progresso da senha de boot nos 5 LEDs: roxo forte por digito correto (da esquerda para a
+// direita) e roxo fraco nos demais. Com a senha fechada, todos assumem a cor do modo escolhido
 void ledsSenhaBoot(int progresso, bool fechada, BootMode modoEscolhido) {
-    for (int i = 0; i < NUM_LEDS; i++) leds[i] = CRGB::Black;
-    for (int i = 0; i < progresso && i < BOOT_SENHA_TAMANHO - 1; i++) leds[1 + i] = CRGB::Purple;
-    if (fechada) leds[0] = corModoBoot(modoEscolhido);
+    for (int i = 0; i < NUM_LEDS; i++) {
+        if (fechada)            leds[i] = corModoBoot(modoEscolhido);
+        else if (i < progresso) leds[i] = CRGB(128, 0, 128);
+        else                    leds[i] = CRGB(20, 0, 20);
+    }
     FastLED.show();
 }
 

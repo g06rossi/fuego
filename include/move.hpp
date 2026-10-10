@@ -192,35 +192,52 @@ potencia maxima ao seu motor para corrigir esse erro, resultando na maior veloci
 durante todo o percurso.
 
 A limitacao do movimento se da pelos limitadores fisicos e a limitacao do tempo de acionamento se
-da pelo delay entre a abertura e o relaxamento do servo
+da pelo delay entre a abertura e o relaxamento do servo (sem pulso, ele para de forcar o limitador)
 */
-void openServo(void *pvParameters) {
-    for (;;) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-        ledc_set_duty(LEDC_LOW_SPEED_MODE, SERVO_LEDC_CHANNEL, angleToDuty(SERVO_ANGULO_ABERTO));
-        ledc_update_duty(LEDC_LOW_SPEED_MODE, SERVO_LEDC_CHANNEL);
+portMUX_TYPE servoMux = portMUX_INITIALIZER_UNLOCKED;
+uint32_t servoComandoId = 0;                  // Muda a cada comando enviado ao servo
 
-        vTaskDelay(pdMS_TO_TICKS(150));       // Tempo para garantir mov 90 graus. Datasheet -> 150ms
+// Tempo para o servo percorrer o curso configurado entre aberto e fechado
+uint32_t tempoAcionamentoServo() {
+    uint32_t curso = abs(SERVO_ANGULO_ABERTO - SERVO_ANGULO_FECHADO);
+    uint32_t tempo = curso * SERVO_MS_POR_GRAU;
+    return tempo > SERVO_TEMPO_MIN_MS ? tempo : SERVO_TEMPO_MIN_MS;
+}
 
+// Leva o servo ao angulo e relaxa depois do tempo de curso. Se outro comando chegar nesse meio
+// tempo, quem relaxa e o comando mais novo, para nao cortar o movimento dele no meio
+void moverServo(int angulo) {
+    portENTER_CRITICAL(&servoMux);
+    uint32_t id = ++servoComandoId;
+    portEXIT_CRITICAL(&servoMux);
+
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, SERVO_LEDC_CHANNEL, angleToDuty(angulo));
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, SERVO_LEDC_CHANNEL);
+
+    vTaskDelay(pdMS_TO_TICKS(tempoAcionamentoServo()));
+
+    portENTER_CRITICAL(&servoMux);
+    bool ultimoComando = (servoComandoId == id);
+    portEXIT_CRITICAL(&servoMux);
+
+    if (ultimoComando) {
         ledc_set_duty(LEDC_LOW_SPEED_MODE, SERVO_LEDC_CHANNEL, 0);
         ledc_update_duty(LEDC_LOW_SPEED_MODE, SERVO_LEDC_CHANNEL);
     }
 }
 
-// Fecha o servomotor
+void openServo(void *pvParameters) {
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        moverServo(SERVO_ANGULO_ABERTO);
+    }
+}
+
 void closeServo(void *pvParameters) {
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-
-        // Fecha o servo
-        ledc_set_duty(LEDC_LOW_SPEED_MODE, SERVO_LEDC_CHANNEL, angleToDuty(SERVO_ANGULO_FECHADO));
-        ledc_update_duty(LEDC_LOW_SPEED_MODE, SERVO_LEDC_CHANNEL);
-
-        vTaskDelay(pdMS_TO_TICKS(150));       // Tempo para garantir mov 90 graus. Datasheet -> 150ms
-
-        ledc_set_duty(LEDC_LOW_SPEED_MODE, SERVO_LEDC_CHANNEL, 0);
-        ledc_update_duty(LEDC_LOW_SPEED_MODE, SERVO_LEDC_CHANNEL);
+        moverServo(SERVO_ANGULO_FECHADO);
     }
 }
 

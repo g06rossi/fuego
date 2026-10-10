@@ -199,9 +199,18 @@ const OpeningStep desempateDireita[] = {
 
 #pragma region TABELAS
 
+// A Curva de Borda e uma funcao (executarCurvaDeBorda), nao uma matriz: avanca ate achar a linha.
+// O dummy so ocupa a posicao dela nas tabelas
 const OpeningStep curvaBordaDummy[] = {
     {0, 0, 0}
 };
+
+const int curvaBordaVelGiro                 = 230;   // Giros de entrada e de saida (no eixo)
+const unsigned long curvaBordaGiroMs        = 65;    // Giro de entrada
+const int curvaBordaVelAvanco               = 127;   // Avanco ate um sensor de linha ver a borda
+const int curvaBordaVelRe                   = 255;
+const unsigned long curvaBordaReMs          = 80;
+const unsigned long curvaBordaGiroVoltaMs   = 170;   // Giro de saida
 
 const OpeningStep* const TABELA_MACROS_ESQ[] = {
     frentao,            // 0
@@ -261,11 +270,23 @@ const char* const NOMES_MACROS[] = {
 
 #pragma region EXECUTAR
 
+// Abre a asa (se escolhida na etapa ASA) com ASA_ANTECEDENCIA_MS de vantagem sobre a macro. O servo
+// roda na propria task, entao termina o curso em paralelo com o movimento
+void abrirAsaAntesDeMover() {
+    if (!abrirAsa) return;
+    xTaskNotifyGive(openServoHandle);
+    if (ASA_ANTECEDENCIA_MS > 0) vTaskDelay(pdMS_TO_TICKS(ASA_ANTECEDENCIA_MS));
+}
+
+// Inicio de toda iniciacao com movimento: JSumos sempre desligados e asa aberta antes de andar
+void prepararIniciacao() {
+    definirJSumos(false);
+    abrirAsaAntesDeMover();
+}
+
 // Executa as estrategias sequenciais e personalizadas
 void executarOpening(const OpeningStep strategySequence[]) {
-    // Lida com haste quando necessario
-    if (abrirAsa) xTaskNotifyGive(openServoHandle);
-    definirJSumos(!furtivoIniciacao);
+    prepararIniciacao();
 
     // Loop de passos -> sai do loop quando o delay for igual a 0
     for (int i = 0; strategySequence[i].delayMs > 0; ++i) {
@@ -291,7 +312,7 @@ void executarOpening(const OpeningStep strategySequence[]) {
 void testSensors() {
     char tabela[512];
     for(;;) {
-        indicarSensoresTeste(value_JS_E, value_IR_E, value_LDR, value_IR_D, value_JS_D);
+        indicarSensores(value_JS_E, value_IR_E, value_LDR, value_IR_D, value_JS_D);
 
         int pos = 0;
         pos += snprintf(tabela + pos, sizeof(tabela) - pos,
@@ -357,27 +378,26 @@ void testMotors() {
 #pragma region SELECIONAR
 
 void executarCurvaDeBorda() {
-    if (abrirAsa) xTaskNotifyGive(openServoHandle);
-    definirJSumos(!furtivoIniciacao);
+    prepararIniciacao();
 
     // Passo 1: Giro
-    if (direction == esquerda) moverMotores(-230, 230);
-    else moverMotores(230, -230);
-    vTaskDelay(pdMS_TO_TICKS(65));
+    if (direction == esquerda) moverMotores(-curvaBordaVelGiro, curvaBordaVelGiro);
+    else moverMotores(curvaBordaVelGiro, -curvaBordaVelGiro);
+    vTaskDelay(pdMS_TO_TICKS(curvaBordaGiroMs));
 
-    // Passo 2: Avanco ate achar a linha (127 é o 50/100 de Fumacinha)
-    moverMotores(127, 127);
+    // Passo 2: Avanco ate achar a linha
+    moverMotores(curvaBordaVelAvanco, curvaBordaVelAvanco);
     while (!value_QRE_E && !value_QRE_D) {
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 
     // Passo 3: Retorno
-    moverMotores(-255, -255);
-    vTaskDelay(pdMS_TO_TICKS(80));
+    moverMotores(-curvaBordaVelRe, -curvaBordaVelRe);
+    vTaskDelay(pdMS_TO_TICKS(curvaBordaReMs));
 
-    if (direction == esquerda) moverMotores(230, -230);
-    else moverMotores(-230, 230);
-    vTaskDelay(pdMS_TO_TICKS(170));
+    if (direction == esquerda) moverMotores(curvaBordaVelGiro, -curvaBordaVelGiro);
+    else moverMotores(-curvaBordaVelGiro, curvaBordaVelGiro);
+    vTaskDelay(pdMS_TO_TICKS(curvaBordaGiroVoltaMs));
 
     definirJSumos(!furtivoMovimentacao);
     moverMotores(0, 0);
@@ -394,7 +414,7 @@ void openingsLutaBT() {
     } else if (macroIndex > 0 && macroIndex <= NUM_MACROS) {
         SerialBT.printf("//=====//%s INICIADO//=====//\n", NOMES_MACROS[macroIndex - 1]);
         
-        if (macroIndex == 10) { // Curva de Borda
+        if (TABELA_MACROS_ESQ[macroIndex - 1] == curvaBordaDummy) {
             executarCurvaDeBorda();
             return;
         } else {
@@ -407,8 +427,8 @@ void openingsLutaBT() {
 
     } else {                                  // Iterativo puro (inicia somente modo iterativo)
         SerialBT.println("//=====//ITERATIVO PURO INICIADO//=====//");
-        if (abrirAsa) xTaskNotifyGive(openServoHandle);
         definirJSumos(!furtivoMovimentacao);
+        abrirAsaAntesDeMover();
         moverMotores(0, 0);
     }
 }

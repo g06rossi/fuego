@@ -117,10 +117,10 @@ VAMPETA       18     19     17     16
 
 // Esquerdo invertido na última montagem (sem termo azul)
 // Configuraveis via NVS (modo Configuracao no BT)
-uint8_t LEFT_POS_PIN           = 19;          //  DOIS | Ponte H M1 A_IN_2 ESP32 IO18
-uint8_t LEFT_NEG_PIN           = 18;          //  DOIS | Ponte H M1 A_IN_1 ESP32 IO19
-uint8_t RIGHT_POS_PIN          = 16;          //  DOIS | Ponte H M2 B_IN_2 ESP32 IO16
-uint8_t RIGHT_NEG_PIN          = 17;          //  DOIS | Ponte H M2 B_IN_1 ESP32 IO17
+uint8_t LEFT_POS_PIN           = 17;          //  DOIS | Ponte H M1 A_IN_2 ESP32 IO18
+uint8_t LEFT_NEG_PIN           = 16;          //  DOIS | Ponte H M1 A_IN_1 ESP32 IO19
+uint8_t RIGHT_POS_PIN          = 18;          //  DOIS | Ponte H M2 B_IN_2 ESP32 IO16
+uint8_t RIGHT_NEG_PIN          = 19;          //  DOIS | Ponte H M2 B_IN_1 ESP32 IO17
 
 #define LEFT_POS_CHANNEL       LEDC_CHANNEL_6 //  DOIS | Canal PWM positivo esquerdo
 #define LEFT_NEG_CHANNEL       LEDC_CHANNEL_7 //  DOIS | Canal PWM negativo esquerdo
@@ -153,7 +153,16 @@ uint8_t SERVOMOTOR_PIN         = 32;          //  DOIS | Servomotor da haste ESP
 #define SERVO_MAX_PULSE_US     2400           //  DOIS | Largura de pulso para 180 graus (µs)
 
 int SERVO_ANGULO_ABERTO        = 180;         //  DOIS | Angulo da asa aberta (configuravel via NVS)
-int SERVO_ANGULO_FECHADO       = 90;          //  DOIS | Angulo da asa fechada (configuravel via NVS)
+int SERVO_ANGULO_FECHADO       = 98;          //  DOIS | Angulo da asa fechada (configuravel via NVS)
+
+// Tempo de acionamento antes de relaxar = curso (aberto - fechado) x SERVO_MS_POR_GRAU. O MG90S
+// faz ~1,7 ms/grau sem carga; 3 ms/grau da folga para o peso da asa e a queda da bateria
+#define SERVO_MS_POR_GRAU      3              //  DOIS | Tempo por grau de curso (ms)
+#define SERVO_TEMPO_MIN_MS     100            //  DOIS | Tempo minimo de acionamento (ms)
+
+// Espera entre mandar a asa abrir e iniciar a macro. 0 = asa e macro simultaneas; o curso completo
+// (~SERVO_MS_POR_GRAU x curso) = asa toda aberta antes de andar, ao custo de atrasar a largada
+int ASA_ANTECEDENCIA_MS        = 50;          //  AUTO | Antecedencia da asa sobre a macro (ms, NVS)
 
 #pragma endregion
 
@@ -194,7 +203,7 @@ uint8_t IR_ESQ_PIN             = 5;           //  AUTO | Sensor IR esquerdo (ati
 
 uint8_t LINHA_DIR_PIN          = 34;          //  AUTO | Sensor Linha direito
 uint8_t LINHA_ESQ_PIN          = 39;          //  AUTO | Sensor Linha esquerdo
-int LINHA_TRESHOLD             = 3800;        //  AUTO | ADC abaixo disso = linha branca
+// LINHA_TRESHOLD fica nos parametros de ajuste do fighting.hpp
 
 uint8_t LDR_PIN                = 36;          //  AUTO | Sensor LDR
 int LDR_TRESHOLD               = 200;         //  AUTO | ADC filtrado abaixo disso = adversario na rampa
@@ -227,7 +236,6 @@ bool inicializado              = false;       //  DOIS | Flag para validar a ini
 bool running                   = false;       //  AUTO | Indica se o robo esta lutando
 bool ready                     = false;       //  AUTO | Usada para testar se o robo recebe IR
 bool seeing                    = false;       //  AUTO | Usada para indicar se o robo ve o outro
-bool furtivoIniciacao          = false;       //  AUTO | JSumos desligados durante a iniciacao
 bool furtivoMovimentacao       = false;       //  AUTO | JSumos desligados durante a movimentacao
 
 unsigned long tempoFighting    = 0;           //  AUTO | Inicio do combate
@@ -254,13 +262,12 @@ enum BootMode {                               //  DOIS | Modo de inicializacao d
 };
 
 enum ConfigStage {                            //  AUTO | Etapas de selecao BT (na ordem do fluxo)
-   STAGE_MODE,                                // Modo: luta, teste sensor, teste motor, personalizada, configuracao
+   STAGE_MODE,                                // Modo: luta, teste sensor, teste motor, personalizada, configuracao, macros
    STAGE_ADVERSARY,                           // Tipo de adversario
    STAGE_WING,                                // Asa aberta ou fechada na luta
    STAGE_CUSTOM_OPENING,                      // Passos da estrategia personalizada (substitui a iniciacao)
    STAGE_INITIATION,                          // Macro de iniciacao
    STAGE_DIRECTION,                           // Direcao da estrategia
-   STAGE_FURTIVE,                             // Modo furtivo da iniciacao
    STAGE_MOVEMENT,                            // Estrategia iterativa de movimentacao
    STAGE_FURTIVE_MOVEMENT,                    // Modo furtivo da movimentacao
    STAGE_FINALIZATION,                        // Finalizacao (LDR ou tempo)
@@ -280,7 +287,8 @@ enum ModoBT {                                 //  AUTO | Opcoes da etapa de modo
    MODO_TESTE_SENSOR,
    MODO_TESTE_MOTOR,
    MODO_PERSONALIZADA,
-   MODO_CONFIGURACAO
+   MODO_CONFIGURACAO,
+   MODO_MACROS
 };
 
 enum FinalizationMode {                       //  AUTO | Finalizacao da estrategia
@@ -322,7 +330,7 @@ struct OpeningStep {                         //  AUTO | Struct para os comandos 
    int delayMs;
 };
 
-BootMode currentBootMode       = BOOT_IDLE;
+BootMode currentBootMode       = BOOT_AUTO;
 ConfigStage currentStage       = STAGE_MODE;
 ModoBT modoBT                  = MODO_LUTA;
 TipoAdversario tipoAdversario  = advRampaComIR;
@@ -343,27 +351,33 @@ OpeningStep customOpening    [MAX_STEPS];
 
 #pragma region TABELA PINOS
 
+/*
+!INFO | Valores configuraveis via NVS
+-----------------------------------
+O valor padrao de cada item e o valor com que a variavel e inicializada no codigo. Ele e lido no
+boot, antes de carregar a NVS (carregarPinConfig). Para mudar um padrao, basta mudar a variavel
+*/
+
 struct PinConfigEntry {
    const char* nome;
    uint8_t* pino;
    const char* nvsKey;
-   uint8_t padrao;
 };
 
 const PinConfigEntry PIN_CONFIG[] = {
-   {"Motor Esq (+)",    &LEFT_POS_PIN,    "p_lp", 19},
-   {"Motor Esq (-)",    &LEFT_NEG_PIN,    "p_ln", 18},
-   {"Motor Dir (+)",    &RIGHT_POS_PIN,   "p_rp", 16},
-   {"Motor Dir (-)",    &RIGHT_NEG_PIN,   "p_rn", 17},
-   {"Servomotor",       &SERVOMOTOR_PIN,  "p_sv", 32},
-   {"NMOS (GND sens.)", &NMOS_PIN,        "p_nm", 25},
-   {"JSumo Direito",    &JSUMO_DIR_PIN,   "p_jd", 14},
-   {"JSumo Esquerdo",   &JSUMO_ESQ_PIN,   "p_je", 23},
-   {"IR Direito",       &IR_DIR_PIN,      "p_id",  4},
-   {"IR Esquerdo",      &IR_ESQ_PIN,      "p_ie",  5},
-   {"Linha Direito",    &LINHA_DIR_PIN,   "p_ld", 34},
-   {"Linha Esquerdo",   &LINHA_ESQ_PIN,   "p_le", 39},
-   {"LDR",              &LDR_PIN,         "p_lr", 36},
+   {"Motor Esq (+)",    &LEFT_POS_PIN,    "p_lp"},
+   {"Motor Esq (-)",    &LEFT_NEG_PIN,    "p_ln"},
+   {"Motor Dir (+)",    &RIGHT_POS_PIN,   "p_rp"},
+   {"Motor Dir (-)",    &RIGHT_NEG_PIN,   "p_rn"},
+   {"Servomotor",       &SERVOMOTOR_PIN,  "p_sv"},
+   {"NMOS (GND sens.)", &NMOS_PIN,        "p_nm"},
+   {"JSumo Direito",    &JSUMO_DIR_PIN,   "p_jd"},
+   {"JSumo Esquerdo",   &JSUMO_ESQ_PIN,   "p_je"},
+   {"IR Direito",       &IR_DIR_PIN,      "p_id"},
+   {"IR Esquerdo",      &IR_ESQ_PIN,      "p_ie"},
+   {"Linha Direito",    &LINHA_DIR_PIN,   "p_ld"},
+   {"Linha Esquerdo",   &LINHA_ESQ_PIN,   "p_le"},
+   {"LDR",              &LDR_PIN,         "p_lr"},
 };
 const int NUM_PIN_CONFIG = sizeof(PIN_CONFIG) / sizeof(PIN_CONFIG[0]);
 
@@ -371,23 +385,32 @@ struct ThresholdConfigEntry {
    const char* nome;
    int* valor;
    const char* nvsKey;
-   int padrao;
    int maximo;
 };
 
 // Definidos junto do codigo que os usa (fighting.hpp e rc_mode.hpp)
+extern int LINHA_TRESHOLD;
 extern int velBuscaLinhaCruzeiro;
+extern int retornoRecuoLateralMs;
+extern int retornoGiroLateralMs;
+extern int retornoRecuoFrontalMs;
+extern int retornoGiroFrontalMs;
 extern int coefReversoEsq;
 extern int coefReversoDir;
 
 const ThresholdConfigEntry THRESHOLD_CONFIG[] = {
-   {"Limiar Linha (QRE)", &LINHA_TRESHOLD,       "t_li", 3800, 4095},
-   {"Limiar LDR",         &LDR_TRESHOLD,         "t_lr",  200, 4095},
-   {"Servo Aberto (graus)",  &SERVO_ANGULO_ABERTO,  "t_sa",  180,  180},
-   {"Servo Fechado (graus)", &SERVO_ANGULO_FECHADO, "t_sf",   90,  180},
-   {"Vel. Busca Linha",      &velBuscaLinhaCruzeiro, "t_vl",  140,  255},
-   {"Coef. Re RC Esq (%)",   &coefReversoEsq,        "t_ce",  100,  100},
-   {"Coef. Re RC Dir (%)",   &coefReversoDir,        "t_cd",  100,  100},
+   {"Limiar Linha (QRE)",    &LINHA_TRESHOLD,        "t_li", 4095},
+   {"Limiar LDR",            &LDR_TRESHOLD,          "t_lr", 4095},
+   {"Servo Aberto (graus)",  &SERVO_ANGULO_ABERTO,   "t_sa",  180},
+   {"Servo Fechado (graus)", &SERVO_ANGULO_FECHADO,  "t_sf",  180},
+   {"Antecedencia Asa (ms)", &ASA_ANTECEDENCIA_MS,   "t_aa", 1000},
+   {"Vel. Busca Linha",      &velBuscaLinhaCruzeiro, "t_vl",  255},
+   {"Ret. Recuo Lat. (ms)",  &retornoRecuoLateralMs, "t_rrl", 1000},
+   {"Ret. Giro Lat. (ms)",   &retornoGiroLateralMs,  "t_rgl", 1000},
+   {"Ret. Recuo Front (ms)", &retornoRecuoFrontalMs, "t_rrf", 1000},
+   {"Ret. Giro Front (ms)",  &retornoGiroFrontalMs,  "t_rgf", 1000},
+   {"Coef. Re RC Esq (%)",   &coefReversoEsq,        "t_ce",  100},
+   {"Coef. Re RC Dir (%)",   &coefReversoDir,        "t_cd",  100},
 };
 const int NUM_THRESHOLD_CONFIG = sizeof(THRESHOLD_CONFIG) / sizeof(THRESHOLD_CONFIG[0]);
 

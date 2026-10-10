@@ -27,15 +27,28 @@ unsigned long ultimoDigitoMs   = 0;           // Instante do ultimo digito receb
 
 #pragma region TABELAS BT
 
-// Imprime (printf) no monitor serial e no terminal Bluetooth
+// Imprime (printf) no monitor serial e no terminal Bluetooth. Textos maiores que o buffer local
+// (como as tabelas das etapas) ganham um buffer do tamanho exato, para nunca serem cortados
 void logBT(const char* formato, ...) {
     char texto[192];
     va_list args;
     va_start(args, formato);
-    vsnprintf(texto, sizeof(texto), formato, args);
+    int tamanho = vsnprintf(texto, sizeof(texto), formato, args);
     va_end(args);
-    Serial.print(texto);
-    SerialBT.print(texto);
+    if (tamanho < 0) return;
+
+    char* saida = texto;
+    if (tamanho >= (int)sizeof(texto)) {
+        saida = (char*)malloc(tamanho + 1);
+        if (saida == nullptr) return;
+        va_start(args, formato);
+        vsnprintf(saida, tamanho + 1, formato, args);
+        va_end(args);
+    }
+
+    Serial.print(saida);
+    SerialBT.print(saida);
+    if (saida != texto) free(saida);
 }
 
 const char* nomeModoBT() {
@@ -44,6 +57,7 @@ const char* nomeModoBT() {
         case MODO_TESTE_MOTOR:   return "Teste de motor";
         case MODO_PERSONALIZADA: return "Estrategia personalizada";
         case MODO_CONFIGURACAO:  return "Configuracao (pinos e parametros)";
+        case MODO_MACROS:        return "Macros (ver valores das iniciacoes)";
         default:                 return "Luta";
     }
 }
@@ -93,7 +107,6 @@ void printLogSelecao() {
         }
 
         linhaLogSelecao("Direcao", currentStage > STAGE_DIRECTION, direction == direita ? "Direita" : "Esquerda");
-        linhaLogSelecao("Furtivo Ini.", currentStage > STAGE_FURTIVE, furtivoIniciacao ? "Ativado" : "Desativado");
         linhaLogSelecao("Movimentacao", currentStage > STAGE_MOVEMENT, nomeMovimento());
         linhaLogSelecao("Furtivo Mov.", currentStage > STAGE_FURTIVE_MOVEMENT, furtivoMovimentacao ? "Ativado" : "Desativado");
         linhaLogSelecao("Finalizacao", currentStage > STAGE_FINALIZATION,
@@ -119,7 +132,8 @@ void printTabelaEtapa() {
                   "  1    | Teste de sensor\n"
                   "  2    | Teste de motor\n"
                   "  3    | Estrategia personalizada\n"
-                  "  4    | Configuracao (pinos e parametros)\n");
+                  "  4    | Configuracao (pinos e parametros)\n"
+                  "  5    | Macros (ver valores das iniciacoes)\n");
             break;
 
         case STAGE_ADVERSARY:
@@ -144,14 +158,6 @@ void printTabelaEtapa() {
             logBT("//=====//ETAPA: ESTRATEGIA PERSONALIZADA//=====//\n"
                   "Envie um passo por linha: vel_esq,vel_dir,delay (max. %d passos)\n"
                   "Envie '.' para finalizar a estrategia\n", MAX_STEPS - 1);
-            break;
-
-        case STAGE_FURTIVE:
-            logBT("//=====//ETAPA: FURTIVO NA INICIACAO//=====//\n"
-                  "Indice | Modo furtivo\n"
-                  "-------|---------------------------------------\n"
-                  "  0    | Desativado (JSumos ligados na iniciacao)\n"
-                  "  1    | Ativado (JSumos desligados na iniciacao)\n");
             break;
 
         case STAGE_FURTIVE_MOVEMENT:
@@ -231,8 +237,7 @@ void avancarEtapa() {
             break;
         case STAGE_CUSTOM_OPENING:   currentStage = STAGE_DIRECTION;        break;
         case STAGE_INITIATION:       currentStage = STAGE_DIRECTION;        break;
-        case STAGE_DIRECTION:        currentStage = STAGE_FURTIVE;          break;
-        case STAGE_FURTIVE:          currentStage = STAGE_MOVEMENT;         break;
+        case STAGE_DIRECTION:        currentStage = STAGE_MOVEMENT;         break;
         case STAGE_MOVEMENT:         currentStage = STAGE_FURTIVE_MOVEMENT; break;
         case STAGE_FURTIVE_MOVEMENT: currentStage = STAGE_FINALIZATION;     break;
         case STAGE_FINALIZATION:
@@ -252,7 +257,7 @@ void aplicarSelecao(int indice) {
 
     switch (currentStage) {
         case STAGE_MODE:
-            if (indice >= MODO_LUTA && indice <= MODO_CONFIGURACAO) {
+            if (indice >= MODO_LUTA && indice <= MODO_MACROS) {
                 modoBT = (ModoBT)indice;
                 if (modoBT == MODO_PERSONALIZADA) {      // Reinicia o buffer personalizado
                     customOpeningCount = 0;
@@ -269,11 +274,6 @@ void aplicarSelecao(int indice) {
 
         case STAGE_WING:
             if (indice == 0 || indice == 1) abrirAsa = (indice == 1);
-            else valido = false;
-            break;
-
-        case STAGE_FURTIVE:
-            if (indice == 0 || indice == 1) furtivoIniciacao = (indice == 1);
             else valido = false;
             break;
 
@@ -389,7 +389,7 @@ void translateBT() {
         bootSenhaProcessar();                 // Janela da senha de boot por IR
         // Atualiza os LEDs com o status dos sensores (a senha em curso toma os LEDs)
         if (bootSenhaProgresso == 0 && !bootSenhaFechada) {
-            indicarSensores(value_IR_E, value_LDR, value_IR_D);
+            indicarSensores(value_JS_E, value_IR_E, value_LDR, value_IR_D, value_JS_D);
         }
 
         if (xQueueReceive(btQueue, &receivedChar, pdMS_TO_TICKS(10))) {
@@ -512,6 +512,91 @@ void configurarPinos() {
 #pragma endregion
 
 //===============================================================================================//
+//=====================================//VISUALIZAR MACROS//=====================================//
+//===============================================================================================//
+
+#pragma region VISUALIZAR MACROS
+
+void printTabelaMacros() {
+    logBT("\n//=====//MACROS DE INICIACAO//=====//\n"
+          "Indice | Macro\n"
+          "-------|---------------------------------------\n");
+    for (int i = 0; i < NUM_MACROS; i++) logBT(" %2d    | %s\n", i + 1, NOMES_MACROS[i]);
+    logBT("-------|---------------------------------------\n"
+          "Envie o indice para ver os passos | '?' reimprime | 'R' reinicia o ESP\n\n");
+}
+
+void printPassosMacro(const char* titulo, const OpeningStep* passos) {
+    logBT("%s\n"
+          "Passo | Vel E | Vel D | Tempo (ms)\n"
+          "------|-------|-------|-----------\n", titulo);
+    for (int i = 0; passos[i].delayMs > 0; i++) {
+        logBT(" %3d  | %5d | %5d | %6d\n", i + 1, passos[i].speedLeft, passos[i].speedRight,
+              passos[i].delayMs);
+    }
+}
+
+// Imprime os passos atuais da macro (mesmo indice da etapa INICIACAO)
+void printMacro(int indice) {
+    if (indice < 1 || indice > NUM_MACROS) {
+        logBT("Indice %d invalido (1-%d)!\n", indice, NUM_MACROS);
+        return;
+    }
+    const OpeningStep* esq = TABELA_MACROS_ESQ[indice - 1];
+    const OpeningStep* dir = TABELA_MACROS_DIR[indice - 1];
+    logBT("\n//=====//MACRO %d: %s//=====//\n", indice, NOMES_MACROS[indice - 1]);
+
+    if (esq == curvaBordaDummy) {
+        logBT("Macro especial (sem matriz), para o lado da DIRECAO escolhida:\n"
+              "  1. Giro no eixo a %d por %lu ms\n"
+              "  2. Frente a %d ate um sensor de linha ver a borda\n"
+              "  3. Re a %d por %lu ms\n"
+              "  4. Giro no eixo de volta a %d por %lu ms\n",
+              curvaBordaVelGiro, curvaBordaGiroMs, curvaBordaVelAvanco,
+              curvaBordaVelRe, curvaBordaReMs, curvaBordaVelGiro, curvaBordaGiroVoltaMs);
+    } else if (esq == dir) {
+        printPassosMacro("Mesmos passos para ESQUERDA e DIREITA", esq);
+    } else {
+        printPassosMacro("Direcao ESQUERDA", esq);
+        printPassosMacro("Direcao DIREITA", dir);
+    }
+    logBT("\nEnvie outro indice | '?' reimprime a lista\n\n");
+}
+
+void verMacros() {
+    printTabelaMacros();
+    numLen = 0;
+
+    for (;;) {
+        char c;
+        if (xQueueReceive(btQueue, &c, pdMS_TO_TICKS(10))) {
+            if (c >= '0' && c <= '9') {
+                if (numLen < (int)sizeof(numBuf) - 1) numBuf[numLen++] = c;
+                ultimoDigitoMs = millis();
+            } else if ((c == '\n' || c == '\r') && numLen > 0) {
+                numBuf[numLen] = '\0';
+                numLen = 0;
+                printMacro(atoi(numBuf));
+            } else if (c == '?') {
+                numLen = 0;
+                printTabelaMacros();
+            } else if (c == 'R' || c == 'r') {
+                logBT("//=====//REINICIANDO ESP//=====//\n");
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                ESP.restart();
+            }
+        } else if (numLen > 0 && millis() - ultimoDigitoMs >= BT_NUM_TIMEOUT_MS) {
+            numBuf[numLen] = '\0';
+            numLen = 0;
+            printMacro(atoi(numBuf));
+        }
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+}
+
+#pragma endregion
+
+//===============================================================================================//
 //===================================//ESCOLHA DA ESTRATEGIA//===================================//
 //===============================================================================================//
 
@@ -559,6 +644,8 @@ void modoAUTO() {
         testMotors();
     } else if (modoBT == MODO_CONFIGURACAO) {
         configurarPinos();
+    } else if (modoBT == MODO_MACROS) {
+        verMacros();
     }
 
     vTaskDelay(pdMS_TO_TICKS(500));

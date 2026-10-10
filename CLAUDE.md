@@ -43,15 +43,26 @@ pio run --target erase         # apaga a flash (apaga a NVS também!)
 - **JSumo E/D** (`JS_E`, `JS_D`): ficam nas **laterais**, perpendiculares à frente. Emitem e recebem. O GND deles passa por um transistor NMOS (`NMOS_PIN`). Desligar o NMOS deixa os JSumos "cegos". Esse é o **modo furtivo**.
 - **IR E/D** (`IR_E`, `IR_D`): ficam na **frente**, cada um angulado ~15° para fora. **Só recebem**, ou seja, detectam a emissão IR do adversário. Um adversário sem emissor pode passar despercebido por eles. São **ativos em LOW** (0 no pino = viu): a ISR inverte a leitura (`value_IR_* = !lerGPIO(...)`), então no resto do código `value_IR_* == 1` significa "viu". Os JSumos são ativos em HIGH e não são invertidos.
 - **Ponto cego:** entre o cone dos IRs (±15°) e os JSumos (90°) há uma faixa que nenhum sensor cobre. Um giro que começa num sensor precisa continuar até chegar no outro.
-- **Linha E/D** (QRE, `value_QRE_E/D`): detectam a borda branca do dohyo. São **analógicos**: ADC abaixo de `LINHA_TRESHOLD` (3800) = linha branca.
+- **Linha E/D** (QRE, `value_QRE_E/D`): detectam a borda branca do dohyo. São **analógicos**: ADC abaixo de `LINHA_TRESHOLD` (3800, definido nos parâmetros do `fighting.hpp` e configurável por NVS) = linha branca.
 - **LDR** (`value_LDR`): detecta a sombra do adversário sobre a rampa. É usado na finalização por LDR. É **analógico**, com média móvel de `LDR_JANELA_FILTRO` (8) amostras: abaixo de `LDR_TRESHOLD` (200) = adversário na rampa.
 - JSumos e IRs são lidos como **digitais** pela ISR `readSensors()` a cada **300 µs** (timer de hardware), com `lerGPIO()`. Linha e LDR são lidos pela `analogSensorTask`, que a própria ISR acorda por notificação a cada ciclo de **300 µs**, porque `analogRead` não pode ser chamado dentro de ISR. Não troque isso por `vTaskDelay`: o menor intervalo dele é 1 ms, um passo do FreeRTOS. A task lê com `adc1_get_raw` (ADC configurado uma vez, `adc_power_acquire`), **nunca com `analogRead`** (veja a seção 11). O Teste de sensor mostra a maior duração de um ciclo (`adcCicloMaxUs`). Os valores crus ficam em `adc_QRE_E/D` e `adc_LDR`, e o Teste de sensor mostra esses valores para calibrar os limiares.
 - O sentido das comparações (abaixo do limiar = detectou) segue o legado sumo-sdk (`profiles/fuego.hpp`). Confirme no Teste de sensor depois de qualquer troca de hardware.
 
 ### Atuadores e outros
 - **Motores:** ponte H com 4 canais LEDC (8 bits, 0–255, 500 Hz). `moverMotores(esq, dir)` aceita valores de -255 a 255. `(0, 0)` aciona o **freio ativo**. Quando um motor inverte o sentido, `processarMovimento` zera o PWM antes (proteção de cruzamento por zero). Comandos repetidos são ignorados. Os prints de cada comando só existem com `DEBUG_MOTORES 1` (`defines.hpp`). Deixe em 0 para lutar, porque o `SerialBT` pode bloquear quando o buffer enche.
-- **Servo da asa:** LEDC de 16 bits a 50 Hz. Ângulos `SERVO_ANGULO_ABERTO` (padrão 180) e `SERVO_ANGULO_FECHADO` (padrão 90) são configuráveis por NVS. O valor de 180 é proposital: o servo aplica força total até bater no limitador físico. Ele é acionado pelas notificações `openServoHandle`/`closeServoHandle`. No AUTO, a asa abre no início da iniciação se `abrirAsa` for verdadeiro (etapa ASA do BT).
-- **LEDs:** 5 LEDs WS2812 no GPIO 33 (FastLED) e o LED embutido no GPIO 2.
+- **Servo da asa:** LEDC de 16 bits a 50 Hz. Ângulos `SERVO_ANGULO_ABERTO` (padrão 180) e `SERVO_ANGULO_FECHADO` (padrão 90) são configuráveis por NVS. O valor de 180 é proposital: o servo aplica força total até bater no limitador físico. Ele é acionado pelas notificações `openServoHandle`/`closeServoHandle`, e as duas tasks chamam `moverServo()`. Ela pulsa o ângulo e depois **relaxa** (duty 0, sem torque), num tempo proporcional ao curso: `|aberto - fechado| × SERVO_MS_POR_GRAU` (3 ms/°, mínimo `SERVO_TEMPO_MIN_MS`). O relaxamento só acontece se nenhum comando novo chegou nesse meio-tempo (`servoComandoId`), para um comando não cortar o outro. No AUTO, a asa abre no início da iniciação se `abrirAsa` for verdadeiro (etapa ASA do BT). No boot, a asa é fechada. Nenhum código fecha a asa depois de aberta. O RC não aciona a asa.
+- **LEDs:** 5 LEDs WS2812 no GPIO 33 (FastLED) e o LED embutido no GPIO 2. Toda animação usa os **5 LEDs**:
+
+  | Momento | LEDs |
+  |---|---|
+  | Setup | 5 vermelhos que viram verdes um a um (`validaSetup`) |
+  | IDLE | Verde "respirando" (`ledsHeartbeat`) |
+  | Modo engatado / espera do BT ou do PS4 | Cor do modo: AUTO vermelho, RC verde (`ledsModo`) |
+  | Seleção BT e Teste de sensor | Painel `indicarSensores`: JS_E, IR_E, LDR, IR_D, JS_D (roxo = viu, laranja = nada) |
+  | Senha de boot | Roxo forte por dígito, roxo fraco nos demais. Ao fechar, os 5 na cor do modo escolhido. Ao cancelar, voltam à cor do modo atual |
+  | IR 1 (pronto) | 5 vermelhos (`AnnihilationModeLeds`) |
+  | IR 2 (largada) e luta | Apagados |
+  | RC com controle conectado | 5 verdes |
 - **Receptor IR** (largada) no GPIO 13.
 
 ### Pinos
@@ -109,18 +120,19 @@ Regiões críticas: `sensorMux` (ISR) e `motorMux` (escrita no LEDC).
 ### 7.1 Configuração por Bluetooth (nome "Fuego Wu")
 Você envia um índice por mensagem e confirma com ENTER ou esperando 600 ms sem digitar. `?` imprime de novo e `R` reinicia. As etapas são, nesta ordem (enum `ConfigStage`, cuja ordem **tem que** seguir o fluxo, porque o log usa `currentStage > STAGE_X`):
 
-1. **MODO:** 0 Luta, 1 Teste de sensor, 2 Teste de motor, 3 Estratégia personalizada, 4 Configuração (pinos e parâmetros). Testes e Configuração terminam a seleção aqui.
+1. **MODO:** 0 Luta, 1 Teste de sensor, 2 Teste de motor, 3 Estratégia personalizada, 4 Configuração (pinos e parâmetros), 5 Macros. Testes, Configuração e Macros terminam a seleção aqui.
 2. **ADVERSÁRIO:** 0 Rampa Simples com IR, 1 Rampa Simples sem IR, 2 Asa Sem Emissor, 3 Asa Com Emissor (`tipoAdversario`).
 3. **ASA:** 0 Fechada, 1 Aberta (`abrirAsa`). Se Aberta, abre no início da iniciação.
 4. **INICIAÇÃO:** 0 nenhuma (iterativo puro) ou 1–10 macro. No modo 3, entra no lugar a **estratégia personalizada** (linhas `vel_esq,vel_dir,delay`, terminadas com `.`).
 5. **DIREÇÃO:** 0 Esquerda, 1 Direita.
-6. **FURTIVO (iniciação):** `furtivoIniciacao`, JSumos desligados durante a macro.
-7. **MOVIMENTAÇÃO:** 0 Ofensiva, 1 Defensiva, 2 Linha, 3 Pulsada (`modoLuta` e `modoLutaOriginal`).
-8. **FURTIVO (movimentação):** `furtivoMovimentacao`, JSumos desligados durante a luta. Nesse caso as leituras os ignoram.
-9. **FINALIZAÇÃO:** 0 LDR, 1 Tempo.
-10. **TEMPO DA FINALIZAÇÃO:** só aparece com Tempo. São os ms até a troca para a Busca Ofensiva (sugerido `FINAL_TEMPO_MS` = 4000).
+6. **MOVIMENTAÇÃO:** 0 Ofensiva, 1 Defensiva, 2 Linha, 3 Pulsada (`modoLuta` e `modoLutaOriginal`).
+7. **FURTIVO (movimentação):** `furtivoMovimentacao`, JSumos desligados durante a luta. Nesse caso as leituras os ignoram. Não há escolha de furtivo para a iniciação: durante a macro, os JSumos ficam **sempre** desligados.
+8. **FINALIZAÇÃO:** 0 LDR, 1 Tempo.
+9. **TEMPO DA FINALIZAÇÃO:** só aparece com Tempo. São os ms até a troca para a Busca Ofensiva (sugerido `FINAL_TEMPO_MS` = 4000).
 
-**Configuração (modo 4):** a tabela mostra ID, componente e valor. Envie o ID e depois o novo valor. `x` salva na NVS e reinicia. A tabela tem os 13 pinos (IDs 0–12), os 2 limiares (13–14), os 2 ângulos do servo (15–16), a velocidade de cruzeiro da Busca Linha (17) e os coeficientes de ré do RC em % (18–19). Para adicionar um item configurável, basta incluir uma linha em `PIN_CONFIG` ou `THRESHOLD_CONFIG` (`defines.hpp`), cada uma com padrão e valor máximo. O menu e a NVS funcionam sozinhos com a linha nova. Se a variável for definida em outro header, declare-a com `extern` antes da tabela (como `velBuscaLinhaCruzeiro` e `coefReversoEsq/Dir`). A tabela só guarda inteiros, então coeficientes vão em porcentagem.
+**Configuração (modo 4):** a tabela mostra ID, componente e valor. Envie o ID e depois o novo valor. `x` salva na NVS e reinicia. A tabela tem os 13 pinos (IDs 0–12), os 2 limiares (13–14), os 2 ângulos do servo (15–16), a antecedência da asa (17), a velocidade de cruzeiro da Busca Linha (18), os tempos do Retorno (19–22: recuo lateral, giro lateral, recuo frontal, giro frontal) e os coeficientes de ré do RC em % (23–24). Para adicionar um item configurável, basta incluir uma linha em `PIN_CONFIG` ou `THRESHOLD_CONFIG` (`defines.hpp`), com nome, ponteiro para a variável, chave da NVS e, nos valores, o máximo. A tabela **não guarda o padrão**: o padrão é o valor com que a variável é inicializada no código, e ele é lido no boot. O menu e a NVS funcionam sozinhos com a linha nova. Se a variável for definida em outro header, declare-a com `extern` antes da tabela (como `LINHA_TRESHOLD`, `velBuscaLinhaCruzeiro` e `coefReversoEsq/Dir`). A tabela só guarda inteiros, então coeficientes vão em porcentagem.
+
+**Macros (modo 5):** só visualiza, não altera nada. Lista as macros de iniciação com os mesmos índices da etapa INICIAÇÃO (1–10). Ao receber um índice, imprime os passos atuais (`Vel E | Vel D | Tempo`) das versões esquerda e direita (uma tabela só quando as duas são iguais). Para a Curva de Borda, que não é matriz, imprime os passos com as constantes `curvaBorda*`. `?` reimprime a lista e `R` reinicia.
 
 **Teste de sensor:** a cada 200 ms imprime uma tabela `Pino | Sensor | Leitura` no BT e no Serial (linha e LDR também mostram o ADC e o limiar), e espelha os sensores nos LEDs.
 
@@ -128,7 +140,7 @@ Você envia um índice por mensagem e confirma com ENTER ou esperando 600 ms sem
 Depois da seleção: **IR 1** → `ready` e LEDs vermelhos. **IR 2** → apaga os LEDs e notifica a `openingsTask`. Ela chama `resetFightingState()`, executa a iniciação (macro, Curva de Borda, personalizada ou nada), marca `tempoFighting` e liga `running = true`. **IR 3** a qualquer momento → parada definitiva.
 
 ### 7.3 Iniciações (`openings.hpp`)
-Cada macro é um vetor de `OpeningStep {velEsq, velDir, delayMs}` terminado em `{0,0,0}`, com versões ESQ e DIR nas tabelas `TABELA_MACROS_ESQ/DIR`, na mesma ordem de `NOMES_MACROS`. O índice do BT é a posição + 1. Macros: Frentão, Frentinho, Curva, Curvão, Em V, Vzinho, Vzão, Giro, Desempate e Curva de Borda. A **Curva de Borda** (índice 10) é uma função especial: gira, avança até achar a linha, lendo `value_QRE_*` direto (não usa `viuLinha`, que só é atualizado com `running == true`), recua e gira de volta. No começo da macro, a asa abre (se `abrirAsa`) e os JSumos seguem `furtivoIniciacao`. No fim, os JSumos seguem `furtivoMovimentacao`.
+Cada macro é um vetor de `OpeningStep {velEsq, velDir, delayMs}` terminado em `{0,0,0}`, com versões ESQ e DIR nas tabelas `TABELA_MACROS_ESQ/DIR`, na mesma ordem de `NOMES_MACROS`. O índice do BT é a posição + 1. Macros: Frentão, Frentinho, Curva, Curvão, Em V, Vzinho, Vzão, Giro, Desempate e Curva de Borda. A **Curva de Borda** (índice 10, identificada pelo ponteiro `curvaBordaDummy` na tabela) é uma função especial, com os valores nas constantes `curvaBorda*` de `openings.hpp`: gira, avança até achar a linha, lendo `value_QRE_*` direto (não usa `viuLinha`, que só é atualizado com `running == true`), recua e gira de volta. Toda iniciação com movimento começa por `prepararIniciacao()`: desliga os JSumos e, se `abrirAsa`, manda a asa abrir e espera `ASA_ANTECEDENCIA_MS` (50 ms, configurável por NVS) antes de mover os motores. O servo roda na própria task (núcleo 0), então termina o curso em paralelo com a macro: 0 deixa tudo simultâneo, e um valor igual ao curso completo (~270 ms) faz a asa abrir toda antes de o robô andar. No fim, os JSumos seguem `furtivoMovimentacao`. No iterativo puro, sem macro, a asa abre com a mesma antecedência antes de a luta começar.
 
 ### 7.4 Despacho do combate (`fightingLogicTask`), por prioridade
 1. `running == false` → não faz nada.
@@ -157,7 +169,7 @@ As três buscas usam `lerAdversario()`. Ela executa os **giros** (iguais em toda
 - **Busca Defensiva:** frente a `velDefensivaFrente` (51). Depois de `defensivaEscalaMs` sem tocar a linha, vira Busca Linha de vez.
 - **Busca Pulsada:** com frente, pulsa `velPulso` por `pulsoDuracaoMs`, para por `pulsoEsperaMs`, até `pulsoQuantidade` pulsos. Qualquer giro da leitura **reinicia a contagem** (`inicioPulsada`). Quando os pulsos acabam ou não há leitura → Busca Linha.
 - **Busca Linha:** cruzeiro a `velBuscaLinhaCruzeiro` (140, configurável por NVS). A cada 4 s sem linha dá uma arrancada de 90 ms a 255. Depois de 7 s sem tocar a linha entra em **Carga Total** (255) até o fim. Os relógios contam desde o último Retorno.
-- **Retorno:** ré (125 ms com 1 sensor, 150 ms com os 2). Depois gira **para o lado oposto ao da linha** (com os 2 sensores, para o lado do último adversário visto) por 120/175 ms. Zera os relógios de linha e a FSM de flanco e volta a `modoLutaOriginal`.
+- **Retorno:** ré por `retornoRecuoLateralMs` (linha vista por 1 sensor) ou `retornoRecuoFrontalMs` (pelos 2). Depois gira **para o lado oposto ao da linha** (com os 2 sensores, para o lado do último adversário visto) por `retornoGiroLateralMs` ou `retornoGiroFrontalMs`. Os quatro tempos são configuráveis por NVS. Zera os relógios de linha e a FSM de flanco e volta a `modoLutaOriginal`.
 - **Desengate:** "S" com curva 140/255 por 50 ms e 255/140 por 100 ms, depois volta ao modo original.
 
 Todos os valores ficam no bloco **PARÂMETROS DE AJUSTE** no topo de `fighting.hpp`. Estado novo de luta precisa ser zerado em `resetFightingState()`.
@@ -168,9 +180,8 @@ Todos os valores ficam no bloco **PARÂMETROS DE AJUSTE** no topo de `fighting.h
 - **R2/L2:** frente e ré. Na ré, cada motor é multiplicado pelo seu coeficiente, `coefReversoEsq`/`coefReversoDir` (em %, padrão 100 = sem atenuação, configuráveis por NVS).
 - **Analógico esquerdo:** curva, com `coefAtenuacao`.
 - **X:** turbo 255.
-- **Círculo:** alterna entre macros em C e em V.
 - **Triângulo:** limita a velocidade a 180.
-- **Setas:** macros.
+- **Seta esquerda / direita:** gira no eixo para o lado da seta (`velMacroGiro` = 255 por `tempoMacroGiroMs` = 180 ms) e freia. São as únicas macros do RC.
 
 Se o controle desconectar, os motores são freados.
 
@@ -181,9 +192,12 @@ Se o controle desconectar, os motores são freados.
 | `boot` | uchar | Modo de boot (0 IDLE, 1 RC, 2 AUTO) |
 | `p_lp`, `p_ln`, `p_rp`, `p_rn`, `p_sv`, `p_nm`, `p_jd`, `p_je`, `p_id`, `p_ie`, `p_ld`, `p_le`, `p_lr` | uchar | Pinos (ausente = padrão) |
 | `t_li`, `t_lr`, `t_sa`, `t_sf` | int | Limiar da linha, limiar do LDR, servo aberto, servo fechado |
-| `t_vl`, `t_ce`, `t_cd` | int | Cruzeiro da Busca Linha, coeficiente de ré esquerdo e direito do RC (%) |
+| `t_aa` | int | Antecedência da asa sobre a macro (ms) |
+| `t_vl` | int | Cruzeiro da Busca Linha |
+| `t_rrl`, `t_rgl`, `t_rrf`, `t_rgf` | int | Retorno: recuo e giro com linha lateral, recuo e giro com linha frontal (ms) |
+| `t_ce`, `t_cd` | int | Coeficiente de ré esquerdo e direito do RC (%) |
 
-`salvarPinConfig()` grava só o que é diferente do padrão e **remove** a chave quando o valor volta ao padrão. As seleções de estratégia do BT **não** são salvas, e precisam ser feitas de novo a cada boot.
+O padrão de cada item é o valor da variável no código. `carregarPinConfig()` guarda esse valor (`padraoPinos`/`padraoValores`) antes de aplicar a NVS. `salvarPinConfig()` grava só o que é diferente do padrão e **remove** a chave quando o valor volta ao padrão. Um valor salvo na NVS vale mais que o do código. Para um padrão novo do código valer, o item não pode estar salvo: ajuste-o pelo menu para o valor do código (isso apaga a chave) ou apague a flash. As seleções de estratégia do BT **não** são salvas, e precisam ser feitas de novo a cada boot.
 
 ## 10. Convenções de código
 

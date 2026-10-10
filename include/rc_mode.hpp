@@ -17,11 +17,13 @@
 #define coefAtenuacao          1.8            // Atenuacao da velocidade em curvas (deve ser FLOAT)
 #define limiteCurva            188.0          // Velocidade limite em curvas puras (deve ser FLOAT)
 
+#define velMacroGiro           255            // Velocidade das macros de giro (setas)
+#define tempoMacroGiroMs       180            // Duracao das macros de giro (ms)
+
 // Coeficientes para balancear a re de cada motor, em % (100 = 1.0, sem atenuacao). Configuraveis via NVS
 int coefReversoEsq             = 100;
-int coefReversoDir             = 100;
+int coefReversoDir             = 83;
 
-volatile bool switchCxV        = false;       // Switch definido para controlar MACRO usado
 volatile bool velLimitada      = false;       // Switch definido pra limitar a velocidade do motor
 int limiteVelocidade           = 255;         // Limite de velocidade do motor
 int zonaMorta                  = 10;          // Zona desconsiderada do controle de PS4
@@ -100,24 +102,6 @@ void modoRC() {
 
 #pragma endregion
 
-//=================================//Switch Estretegia Inicial//=================================//
-
-#pragma region SWITCH ESTRATEGIA
-
-        // Permite movimentacao em V
-        } else if (PS4.Circle() && !switchCxV) {
-            vTaskDelay(pdMS_TO_TICKS(50));
-            switchCxV = true;
-            vTaskDelay(pdMS_TO_TICKS(200));   // Evita multiplas leituras
-        
-        // Permite movimentacao em C
-        } else if (PS4.Circle()) {
-            vTaskDelay(pdMS_TO_TICKS(50));
-            switchCxV = false;
-            vTaskDelay(pdMS_TO_TICKS(200));   // Evita multiplas leituras
-
-#pragma endregion
-
 //==============================//Limitador da potencia dos motores//============================//
 
 #pragma region LIMITADOR
@@ -140,64 +124,20 @@ void modoRC() {
 //==========================================//MACROS//===========================================//
 //===============================================================================================//
 
-//========================================//Macros em V//========================================//
+//=======================================//Macros de Giro//======================================//
 
-#pragma region MACRO EM V
+#pragma region MACROS DE GIRO
 
-        // Movimentacao em V para a esquerda
-        } else if (PS4.Left() > 0 && switchCxV) {
-            vTaskDelay(pdMS_TO_TICKS(10));    // Delay para garantir o fim da logica anterior
-            xTaskNotifyGive(openServoHandle); // Abre o servomotor
-            moverMotores(-255, 255);          // Gira para a esquerda
-            vTaskDelay(pdMS_TO_TICKS(40));
-            moverMotores(255, 255);           // Anda para frente
-            vTaskDelay(pdMS_TO_TICKS(150));
-            moverMotores(255, -255);          // Gira para a direita
-            vTaskDelay(pdMS_TO_TICKS(130));
-            moverMotores(255, 255);           // Anda para frente  
-            vTaskDelay(pdMS_TO_TICKS(100));
+        // Seta esquerda: gira no eixo para a esquerda
+        } else if (PS4.Left() > 0) {
+            moverMotores(-velMacroGiro, velMacroGiro);
+            vTaskDelay(pdMS_TO_TICKS(tempoMacroGiroMs));
             moverMotores(0, 0);               // Para os motores
 
-        // Movimentacao em V para a direita
-        } else if (PS4.Right() > 0 && switchCxV) {
-            vTaskDelay(pdMS_TO_TICKS(10));    // Delay para garantir o fim da logica anterior
-            xTaskNotifyGive(openServoHandle); // Abre o servomotor
-            moverMotores(255, -255);          // Gira para a direita
-            vTaskDelay(pdMS_TO_TICKS(40));
-            moverMotores(255, 255);           // Anda para frente
-            vTaskDelay(pdMS_TO_TICKS(150));
-            moverMotores(-255, 255);          // Gira para a esquerda
-            vTaskDelay(pdMS_TO_TICKS(130));
-            moverMotores(255, 255);           // Anda para frente  
-            vTaskDelay(pdMS_TO_TICKS(100));
-            moverMotores(0, 0);               // Para os motores
-
-#pragma endregion
-
-//======================================//Macros Desviada//======================================//
-
-#pragma region MACRO DESVIADA
-
-        // Movimentacao em C para a esquerda
-        } else if (PS4.Left() > 0 && !switchCxV) {
-            vTaskDelay(pdMS_TO_TICKS(10));    // Delay para garantir o fim da logica anterior
-            moverMotores(-255, 255);          // Gira para a direita
-            vTaskDelay(pdMS_TO_TICKS(75));
-            moverMotores(255, 100);         // Para tras
-            vTaskDelay(pdMS_TO_TICKS(144));
-            moverMotores(255, -255);          // Gira para a direita
-            vTaskDelay(pdMS_TO_TICKS(156));
-            moverMotores(0, 0);               // Para os motores
-
-        // Movimentacao em V para a direita
-        } else if (PS4.Right() > 0 && !switchCxV) {
-            vTaskDelay(pdMS_TO_TICKS(10));    // Delay para garantir o fim da logica anterior
-            moverMotores(255, -255);          // Gira para a direita
-            vTaskDelay(pdMS_TO_TICKS(75));
-            moverMotores(127, 255);         // Para tras
-            vTaskDelay(pdMS_TO_TICKS(144));
-            moverMotores(-255, 255);          // Gira para a direita
-            vTaskDelay(pdMS_TO_TICKS(156));
+        // Seta direita: gira no eixo para a direita
+        } else if (PS4.Right() > 0) {
+            moverMotores(velMacroGiro, -velMacroGiro);
+            vTaskDelay(pdMS_TO_TICKS(tempoMacroGiroMs));
             moverMotores(0, 0);               // Para os motores
 
 #pragma endregion

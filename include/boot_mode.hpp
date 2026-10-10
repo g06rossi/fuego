@@ -58,7 +58,16 @@ void salvarBootMode(BootMode modo) {
     preferences.end();
 }
 
+// Padroes de cada item configuravel: o valor com que a variavel foi inicializada no codigo
+uint8_t padraoPinos[NUM_PIN_CONFIG];
+int padraoValores[NUM_THRESHOLD_CONFIG];
+
 void carregarPinConfig() {
+    // Captura os padroes antes de a NVS sobrescrever as variaveis (e antes do begin, que falha
+    // no primeiro boot porque o namespace ainda nao existe)
+    for (int i = 0; i < NUM_PIN_CONFIG; i++) padraoPinos[i] = *PIN_CONFIG[i].pino;
+    for (int i = 0; i < NUM_THRESHOLD_CONFIG; i++) padraoValores[i] = *THRESHOLD_CONFIG[i].valor;
+
     if (!preferences.begin(NVS_NAMESPACE, true)) return;
     for (int i = 0; i < NUM_PIN_CONFIG; i++) {
         uint8_t val = preferences.getUChar(PIN_CONFIG[i].nvsKey, 0xFF);
@@ -78,13 +87,13 @@ void salvarPinConfig() {
         return;
     }
     for (int i = 0; i < NUM_PIN_CONFIG; i++) {
-        if (*PIN_CONFIG[i].pino != PIN_CONFIG[i].padrao)
+        if (*PIN_CONFIG[i].pino != padraoPinos[i])
             preferences.putUChar(PIN_CONFIG[i].nvsKey, *PIN_CONFIG[i].pino);
         else
             preferences.remove(PIN_CONFIG[i].nvsKey);
     }
     for (int i = 0; i < NUM_THRESHOLD_CONFIG; i++) {
-        if (*THRESHOLD_CONFIG[i].valor != THRESHOLD_CONFIG[i].padrao)
+        if (*THRESHOLD_CONFIG[i].valor != padraoValores[i])
             preferences.putInt(THRESHOLD_CONFIG[i].nvsKey, *THRESHOLD_CONFIG[i].valor);
         else
             preferences.remove(THRESHOLD_CONFIG[i].nvsKey);
@@ -151,9 +160,11 @@ void bootSenhaProcessar() {
 
     static int ultimoProgressoLed = -1;
     if (bootSenhaProgresso == 0 && !bootSenhaFechada) {
-        if (ultimoProgressoLed != -1) {       // Senha cancelada: apaga o roxo
+        if (ultimoProgressoLed != -1) {       // Senha cancelada: devolve os LEDs ao modo atual
             ultimoProgressoLed = -1;
-            clearLeds();
+            // No IDLE o heartbeat repinta sozinho; no AUTO e no RC nada repinta ate conectar
+            if (currentBootMode == BOOT_IDLE) clearLeds();
+            else ledsModo(currentBootMode);
         }
         return;
     }
