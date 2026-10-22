@@ -38,12 +38,16 @@ TaskHandle_t openingsHandle   = NULL;        //  AUTO | Handle da task da estrat
 
 TaskHandle_t stopRobotHandle   = NULL;        //  AUTO | Handle da task de desligar robo
 TaskHandle_t IRCommandHandle   = NULL;        //  AUTO | Handle da task de interpretar IR
-TaskHandle_t swSensorHandle    = NULL;        //  AUTO | Handle da task pra desligar sensor
 TaskHandle_t analogSensorHandle = NULL;       //  DOIS | Handle da task de leitura de linha e LDR
 
 QueueHandle_t btQueue;                        //  AUTO | Handle da fila do BT
 
-volatile uint16_t ultimoComandoIR = 0xFFFF;   //  DOIS | Armazena o comando IR recebido
+// Comandos IR decodificados (botao N chega como N-1). A irMonitorTask escreve no nucleo 0 e quem
+// estiver esperando comandos le no nucleo 1; a fila evita perder um comando entre leitura e limpeza
+QueueHandle_t irQueue          = NULL;        //  DOIS | Fila dos comandos IR
+#define IR_FILA_TAMANHO        8              //  DOIS | Comandos IR guardados ate alguem ler
+
+SemaphoreHandle_t ledsMutex    = NULL;        //  DOIS | Acesso exclusivo ao FastLED (criado em setupLeds)
 
 // Mux para a leitura de sensores e escrita dos motores
 portMUX_TYPE sensorMux = portMUX_INITIALIZER_UNLOCKED;
@@ -127,7 +131,7 @@ uint8_t RIGHT_NEG_PIN          = 19;          //  DOIS | Ponte H M2 B_IN_1 ESP32
 #define RIGHT_POS_CHANNEL      LEDC_CHANNEL_4 //  DOIS | Canal PWM positivo direito
 #define RIGHT_NEG_CHANNEL      LEDC_CHANNEL_5 //  DOIS | Canal PWM negativo direito
 
-#define PWM_FREQ               500            //  DOIS | Frequencia para os motores (Hz)
+#define PWM_FREQ               25000          //  DOIS | Frequencia para os motores (Hz)
 #define PWM_FREIO              255            //  DOIS | PWM de freio ativo dos motores
 #define PWM_RESOLUTION         8              //  DOIS | Resolucao de 8 bits
 #define PWM_ZERO_DELAY         30             //  DOIS | Tempo para Ponte H limpar PWM (µs)
@@ -176,8 +180,13 @@ int ASA_ANTECEDENCIA_MS        = 50;          //  AUTO | Antecedencia da asa sob
 #define LEDS_ENDERECAVEIS_PIN  33             //  DOIS | LEDs enderecaveis ESP32 IO33
 #define NUM_LEDS               5              //  DOIS | Numero de LEDs enderecaveis
 
-#define MAX_STEPS              20             //  AUTO | Numero maximo de passos da estrategia z
-#define BT_BUFFER_SIZE         64             //  AUTO | Tamanho buffer de comandos personalizados
+#define MAX_STEPS              20             //  AUTO | Passos de uma matriz (ate MAX_STEPS-1 + o {0,0,0} final)
+#define PASSO_MAX_MS           10000          //  AUTO | Tempo maximo de um passo da personalizada (ms)
+#define MAX_MACROS             20             //  AUTO | Iniciacoes maximas (padroes + novas criadas pelo BT)
+#define NOME_MACRO_MAX         16             //  AUTO | Tamanho do nome de uma iniciacao (com o '\0')
+#define HISTORICO_TAMANHO      5              //  AUTO | Personalizadas guardadas no historico
+#define NVS_NAMESPACE_MACROS   "fuego_mac"    //  AUTO | Namespace da NVS das iniciacoes e do historico
+#define BT_BUFFER_SIZE         64             //  AUTO | Tamanho de uma linha recebida pelo BT
 #define BT_QUEUE_LENGTH        128            //  AUTO | Tamanho da fila de BT
 #define BT_NUM_TIMEOUT_MS      600            //  AUTO | Tempo sem digitos para validar o indice recebido
 
@@ -201,12 +210,14 @@ uint8_t JSUMO_ESQ_PIN          = 23;          //  AUTO | JSumo esquerdo
 uint8_t IR_DIR_PIN             = 4;           //  AUTO | Sensor IR direito (ativo em LOW)
 uint8_t IR_ESQ_PIN             = 5;           //  AUTO | Sensor IR esquerdo (ativo em LOW)
 
-uint8_t LINHA_DIR_PIN          = 34;          //  AUTO | Sensor Linha direito
-uint8_t LINHA_ESQ_PIN          = 39;          //  AUTO | Sensor Linha esquerdo
+uint8_t LINHA_DIR_PIN          = 39;          //  AUTO | Sensor Linha direito
+uint8_t LINHA_ESQ_PIN          = 34;          //  AUTO | Sensor Linha esquerdo
 // LINHA_TRESHOLD fica nos parametros de ajuste do fighting.hpp
 
 uint8_t LDR_PIN                = 36;          //  AUTO | Sensor LDR
-int LDR_TRESHOLD               = 200;         //  AUTO | ADC filtrado abaixo disso = adversario na rampa
+int LDR_TRESHOLD               = 400;         //  AUTO | ADC filtrado abaixo disso = adversario na rampa
+
+int PERIODO_SENSORES_US        = 300;         //  DOIS | Periodo do timer de leitura dos sensores (us, NVS)
 
 #pragma endregion
 
@@ -228,13 +239,23 @@ volatile int adc_QRE_D         = 0;           //  AUTO | ADC cru do Linha Direit
 volatile int adc_LDR           = 0;           //  AUTO | ADC do LDR apos a media movel (0-4095)
 
 #define LDR_JANELA_FILTRO      8              //  AUTO | Amostras da media movel do LDR
-#define ADC_CICLO_LIMITE_US    200            //  DOIS | Ciclo de ADC mais longo que isso cede 1 ms ao nucleo 0
+// Ciclo de ADC mais longo que 2/3 do periodo dos sensores cede 1 ms ao nucleo 0 (protege o watchdog)
+#define ADC_CICLO_LIMITE_US    (PERIODO_SENSORES_US * 2 / 3)
 
 volatile uint32_t adcCicloMaxUs = 0;          //  DOIS | Maior duracao medida de um ciclo de ADC (us)
 
-bool inicializado              = false;       //  DOIS | Flag para validar a inicializacao 
-bool running                   = false;       //  AUTO | Indica se o robo esta lutando
-bool ready                     = false;       //  AUTO | Usada para testar se o robo recebe IR
+// IR 3 recebido: nada mais move o robo ate reiniciar (nunca volta a false)
+volatile bool roboParado       = false;       //  DOIS | Trava da parada definitiva
+#define PARADA_REFORCO_MS      5              //  DOIS | Espera ate o segundo freio da parada (ms)
+#define IR_LEITURA_MS          20             //  DOIS | Intervalo de leitura do receptor IR (ms)
+
+// Liberada pelo modoAUTO ao fim da selecao: so entao a irMonitorTask repassa os comandos IR para a
+// handleIRCommand (IR 1 = pronto, IR 2 = largada). Volta a false depois da largada
+volatile bool largadaLiberada  = false;       //  AUTO | handleIRCommand recebendo comandos
+
+bool inicializado              = false;       //  DOIS | Flag para validar a inicializacao
+volatile bool running          = false;       //  AUTO | Indica se o robo esta lutando
+volatile bool ready            = false;       //  AUTO | Usada para testar se o robo recebe IR
 bool seeing                    = false;       //  AUTO | Usada para indicar se o robo ve o outro
 bool furtivoMovimentacao       = false;       //  AUTO | JSumos desligados durante a movimentacao
 
@@ -244,10 +265,8 @@ volatile int novaVE            = 0;           //  DOIS | Velocidade pra atualiza
 volatile int novaVD            = 0;           //  DOIS | Velocidade pra atualizar o motor direito
 
 int customOpeningCount         = 0;           //  AUTO | Contagem de passos da estrategia personalizada
-int bufferIndex                = 0;           //  AUTO | Indice para controlar a posicao no buffer
 
 int macroIndex                 = 0;           //  AUTO | Iniciacao escolhida (0 = nenhuma, N = macro N-1)
-char btBuffer[BT_BUFFER_SIZE];                //  AUTO | Buffer para os comandos personalizados
 
 #pragma endregion
 
@@ -262,10 +281,9 @@ enum BootMode {                               //  DOIS | Modo de inicializacao d
 };
 
 enum ConfigStage {                            //  AUTO | Etapas de selecao BT (na ordem do fluxo)
-   STAGE_MODE,                                // Modo: luta, teste sensor, teste motor, personalizada, configuracao, macros
+   STAGE_MODE,                                // Modo: luta, testes, personalizada, configuracao, macros, rapidas
    STAGE_ADVERSARY,                           // Tipo de adversario
    STAGE_WING,                                // Asa aberta ou fechada na luta
-   STAGE_CUSTOM_OPENING,                      // Passos da estrategia personalizada (substitui a iniciacao)
    STAGE_INITIATION,                          // Macro de iniciacao
    STAGE_DIRECTION,                           // Direcao da estrategia
    STAGE_MOVEMENT,                            // Estrategia iterativa de movimentacao
@@ -288,7 +306,9 @@ enum ModoBT {                                 //  AUTO | Opcoes da etapa de modo
    MODO_TESTE_MOTOR,
    MODO_PERSONALIZADA,
    MODO_CONFIGURACAO,
-   MODO_MACROS
+   MODO_MACROS,
+   MODO_RAPIDA_JSUMO_LIGADO,                  // Luta com presets: so pergunta iniciacao e direcao
+   MODO_RAPIDA_JSUMO_DESLIGADO                // Idem, com furtivo na movimentacao
 };
 
 enum FinalizationMode {                       //  AUTO | Finalizacao da estrategia
@@ -385,6 +405,7 @@ struct ThresholdConfigEntry {
    const char* nome;
    int* valor;
    const char* nvsKey;
+   int minimo;
    int maximo;
 };
 
@@ -399,18 +420,20 @@ extern int coefReversoEsq;
 extern int coefReversoDir;
 
 const ThresholdConfigEntry THRESHOLD_CONFIG[] = {
-   {"Limiar Linha (QRE)",    &LINHA_TRESHOLD,        "t_li", 4095},
-   {"Limiar LDR",            &LDR_TRESHOLD,          "t_lr", 4095},
-   {"Servo Aberto (graus)",  &SERVO_ANGULO_ABERTO,   "t_sa",  180},
-   {"Servo Fechado (graus)", &SERVO_ANGULO_FECHADO,  "t_sf",  180},
-   {"Antecedencia Asa (ms)", &ASA_ANTECEDENCIA_MS,   "t_aa", 1000},
-   {"Vel. Busca Linha",      &velBuscaLinhaCruzeiro, "t_vl",  255},
-   {"Ret. Recuo Lat. (ms)",  &retornoRecuoLateralMs, "t_rrl", 1000},
-   {"Ret. Giro Lat. (ms)",   &retornoGiroLateralMs,  "t_rgl", 1000},
-   {"Ret. Recuo Front (ms)", &retornoRecuoFrontalMs, "t_rrf", 1000},
-   {"Ret. Giro Front (ms)",  &retornoGiroFrontalMs,  "t_rgf", 1000},
-   {"Coef. Re RC Esq (%)",   &coefReversoEsq,        "t_ce",  100},
-   {"Coef. Re RC Dir (%)",   &coefReversoDir,        "t_cd",  100},
+   {"Limiar Linha (QRE)",    &LINHA_TRESHOLD,        "t_li",    0,  4095},
+   {"Limiar LDR",            &LDR_TRESHOLD,          "t_lr",    0,  4095},
+   {"Servo Aberto (graus)",  &SERVO_ANGULO_ABERTO,   "t_sa",    0,   180},
+   {"Servo Fechado (graus)", &SERVO_ANGULO_FECHADO,  "t_sf",    0,   180},
+   {"Antecedencia Asa (ms)", &ASA_ANTECEDENCIA_MS,   "t_aa",    0,  1000},
+   {"Vel. Busca Linha",      &velBuscaLinhaCruzeiro, "t_vl",    0,   255},
+   {"Ret. Recuo Lat. (ms)",  &retornoRecuoLateralMs, "t_rrl",   0,  1000},
+   {"Ret. Giro Lat. (ms)",   &retornoGiroLateralMs,  "t_rgl",   0,  1000},
+   {"Ret. Recuo Front (ms)", &retornoRecuoFrontalMs, "t_rrf",   0,  1000},
+   {"Ret. Giro Front (ms)",  &retornoGiroFrontalMs,  "t_rgf",   0,  1000},
+   {"Coef. Re RC Esq (%)",   &coefReversoEsq,        "t_ce",    0,   100},
+   {"Coef. Re RC Dir (%)",   &coefReversoDir,        "t_cd",    0,   100},
+   // Abaixo de 100 us o timer dispara rapido demais para a ISR e as tasks dos sensores
+   {"Periodo Sensores (us)", &PERIODO_SENSORES_US,   "t_ps",  100, 10000},
 };
 const int NUM_THRESHOLD_CONFIG = sizeof(THRESHOLD_CONFIG) / sizeof(THRESHOLD_CONFIG[0]);
 

@@ -101,46 +101,6 @@ void brakeMotors() {
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEFT_NEG_CHANNEL);
 
     portEXIT_CRITICAL(&motorMux);             // Fim da estrutura critica
-
-    vTaskDelay(pdMS_TO_TICKS(1));             // Delay para garantir que o robo para de fato
-}
-
-#pragma endregion
-
-//==============================//Processar Movimento dos Motores//==============================//
-
-#pragma region PROCESSAR PWM
-
-void processarMovimento(int velocidadeEsquerdaMotor, int velocidadeDireitaMotor) {
-    static int ultimaVE = 0;
-    static int ultimaVD = 0;
-
-    // Caso (0, 0): aplica freio ativo
-    if (velocidadeEsquerdaMotor == 0 && velocidadeDireitaMotor == 0) {
-        brakeMotors();
-#if DEBUG_MOTORES
-        SerialBT.println("FREIO");
-        Serial.println("FREIO");
-#endif
-
-    // Caso de troca de polaridade: zera PWM antes de inverter
-    } else if (
-        (ultimaVE > 0 && velocidadeEsquerdaMotor < 0) || 
-        (ultimaVE < 0 && velocidadeEsquerdaMotor > 0) ||
-        (ultimaVD > 0 && velocidadeDireitaMotor < 0) || 
-        (ultimaVD < 0 && velocidadeDireitaMotor > 0)
-    ) {
-        stopMotors();
-        setMotors(velocidadeEsquerdaMotor, velocidadeDireitaMotor);
-
-    // Caso padrao: mantem fluidez
-    } else {
-        setMotors(velocidadeEsquerdaMotor, velocidadeDireitaMotor);
-    }
-
-    // Atualiza os valores das ultimas velocidades
-    ultimaVE = velocidadeEsquerdaMotor;
-    ultimaVD = velocidadeDireitaMotor;
 }
 
 #pragma endregion
@@ -149,20 +109,58 @@ void processarMovimento(int velocidadeEsquerdaMotor, int velocidadeDireitaMotor)
 
 #pragma region FUNCAO GLOBAL
 
+/*
+!INFO | Unico caminho para os motores
+-----------------------------------
+Toda task comanda os motores por aqui (luta, iniciacoes, personalizada, RC e a parada do IR 3).
+O cache do ultimo comando evita reescrever o mesmo PWM e detecta troca de sentido; ele e
+compartilhado entre tasks de nucleos diferentes, por isso e lido e atualizado sob o motorMux.
+Com roboParado (IR 3), qualquer comando vira freio
+*/
 void moverMotores(int velocidadeEsquerdaMotor, int velocidadeDireitaMotor) {
     static int ultimaVE = 0;
     static int ultimaVD = 0;
 
-    // So notifica a processarMovimento se a velocidade realmente mudou
-    if (velocidadeEsquerdaMotor != ultimaVE || velocidadeDireitaMotor != ultimaVD) {
-        novaVE = velocidadeEsquerdaMotor;
-        novaVD = velocidadeDireitaMotor;
-        processarMovimento(novaVE, novaVD);
+    if (roboParado) {
+        velocidadeEsquerdaMotor = 0;
+        velocidadeDireitaMotor = 0;
     }
 
-    // Atualiza os valores das ultimas velocidades
+    portENTER_CRITICAL(&motorMux);
+    bool mudou = (velocidadeEsquerdaMotor != ultimaVE || velocidadeDireitaMotor != ultimaVD);
+    bool inverteSentido = (ultimaVE > 0 && velocidadeEsquerdaMotor < 0) ||
+                          (ultimaVE < 0 && velocidadeEsquerdaMotor > 0) ||
+                          (ultimaVD > 0 && velocidadeDireitaMotor < 0) ||
+                          (ultimaVD < 0 && velocidadeDireitaMotor > 0);
     ultimaVE = velocidadeEsquerdaMotor;
     ultimaVD = velocidadeDireitaMotor;
+    portEXIT_CRITICAL(&motorMux);
+
+    if (!mudou) return;
+    novaVE = velocidadeEsquerdaMotor;
+    novaVD = velocidadeDireitaMotor;
+
+    if (velocidadeEsquerdaMotor == 0 && velocidadeDireitaMotor == 0) {
+        brakeMotors();                        // (0, 0): freio ativo
+#if DEBUG_MOTORES
+        SerialBT.println("FREIO");
+        Serial.println("FREIO");
+#endif
+    } else {
+        if (inverteSentido) stopMotors();     // Zera o PWM antes de inverter a polaridade
+        setMotors(velocidadeEsquerdaMotor, velocidadeDireitaMotor);
+    }
+}
+
+// IR 3: trava os motores para sempre (regra do campeonato: nao pode haver multi-round)
+void travarMotores() {
+    roboParado = true;
+    running = false;
+    moverMotores(0, 0);
+    // Uma task que ja tinha passado pela checagem de roboParado pode escrever o PWM logo depois do
+    // freio acima. Esperar e frear de novo, direto no LEDC, cobre esse caso
+    vTaskDelay(pdMS_TO_TICKS(PARADA_REFORCO_MS));
+    brakeMotors();
 }
 
 #pragma endregion

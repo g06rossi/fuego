@@ -151,11 +151,14 @@ bool bootSenhaFeed(int digito) {
     return true;
 }
 
-// Consome o comando IR pendente (se houver) para a senha. Chamar a cada iteracao da janela
-void bootSenhaProcessar() {
-    if (ultimoComandoIR != 0xFFFF) {
+// Consome o proximo comando IR da fila para a senha. Chamar a cada iteracao da janela. Devolve o
+// comando que nao era da senha (para quem chamou tratar, ex.: 8/9 no IDLE) ou -1
+int bootSenhaProcessar() {
+    int naoConsumido = -1;
+    uint16_t comando;
+    if (receberComandoIR(comando)) {
         // Botao N do controle chega como comando N-1 (ex.: botao 8 = 0x7)
-        if (bootSenhaFeed((int)ultimoComandoIR + 1)) ultimoComandoIR = 0xFFFF;
+        if (!bootSenhaFeed((int)comando + 1)) naoConsumido = comando;
     }
 
     static int ultimoProgressoLed = -1;
@@ -166,7 +169,7 @@ void bootSenhaProcessar() {
             if (currentBootMode == BOOT_IDLE) clearLeds();
             else ledsModo(currentBootMode);
         }
-        return;
+        return naoConsumido;
     }
 
     if (ultimoProgressoLed != bootSenhaProgresso + (bootSenhaFechada ? 10 : 0)) {
@@ -181,6 +184,7 @@ void bootSenhaProcessar() {
         vTaskDelay(pdMS_TO_TICKS(50));
         ESP.restart();
     }
+    return naoConsumido;
 }
 
 // Fecha a janela da senha (luta iniciada ou controle conectado)

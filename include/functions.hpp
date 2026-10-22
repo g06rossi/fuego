@@ -55,14 +55,28 @@ void directWriteLow(int pin) {
         GPIO.out1_w1tc.val = ((uint32_t)1 << (pin - 32));
 }
 
-bool gndLigado = true;                        // Estado do NMOS que conecta o GND dos JSumos
-
-// Define o estado dos JSumos de forma absoluta. A notificacao do switchSensor so alterna e
-// perde notificacoes seguidas (ulTaskNotifyTake com pdTRUE zera a contagem)
+// Liga (true) ou desliga (false, modo furtivo) o NMOS que conecta o GND dos JSumos
 void definirJSumos(bool ligado) {
     if (ligado) directWriteHigh(NMOS_PIN);
     else directWriteLow(NMOS_PIN);
-    gndLigado = ligado;
+}
+
+#pragma endregion
+
+//===============================================================================================//
+//=======================================//COMANDOS IR//=========================================//
+//===============================================================================================//
+
+#pragma region COMANDOS IR
+
+// Retira o proximo comando IR da fila, sem esperar. Devolve false se nao houver
+bool receberComandoIR(uint16_t& comando) {
+    return xQueueReceive(irQueue, &comando, 0) == pdTRUE;
+}
+
+// Descarta os comandos pendentes (recebidos numa fase em que ninguem os esperava)
+void descartarComandosIR() {
+    xQueueReset(irQueue);
 }
 
 #pragma endregion
@@ -73,22 +87,56 @@ void definirJSumos(bool ligado) {
 
 #pragma region LEDS
 
-// Pisca o LED embutido um certo numero de vezes com um delay
+/*
+!INFO | Acesso aos LEDs enderecaveis
+-----------------------------------
+O FastLED nao e seguro entre tasks, e a parada do IR 3 (nucleo 0) pode desenhar enquanto o loop
+(nucleo 1) anima. Toda animacao faz: pegarLeds() -> escreve em leds[] -> mostrarLeds(). Depois do
+IR 3, pegarLeds() recusa, e so ledsParada() muda os LEDs: o vermelho da parada nao e apagado
+*/
+
+// Reserva os LEDs para uma animacao. Devolve false (sem reservar) se o robo esta travado pelo IR 3
+bool pegarLeds() {
+    xSemaphoreTake(ledsMutex, portMAX_DELAY);
+    if (roboParado) {
+        xSemaphoreGive(ledsMutex);
+        return false;
+    }
+    return true;
+}
+
+// Envia leds[] para a fita e libera os LEDs reservados por pegarLeds()
+void mostrarLeds() {
+    FastLED.show();
+    xSemaphoreGive(ledsMutex);
+}
+
+// Pisca o LED embutido um certo numero de vezes com um delay (depois do IR 3 ele fica aceso)
 void blinkLED(int times, int delayTime) {
-    for (int i = 0; i < times; i++) {
+    for (int i = 0; i < times && !roboParado; i++) {
         directWriteLow(LED_PIN);
         vTaskDelay(pdMS_TO_TICKS(delayTime));
         directWriteHigh(LED_PIN);
         vTaskDelay(pdMS_TO_TICKS(delayTime));
     }
-    directWriteLow(LED_PIN);
+    if (!roboParado) directWriteLow(LED_PIN);
 }
 
 // Configura os LEDs enderecaveis com o tipo de chip (WS2812), pino e ordem de cores
 void setupLeds() {
+    ledsMutex = xSemaphoreCreateMutex();
     FastLED.addLeds<WS2812,LEDS_ENDERECAVEIS_PIN, GRB>(leds, NUM_LEDS);
     FastLED.clear();
     FastLED.show();
+}
+
+// IR 3: LED embutido aceso e os 5 enderecaveis vermelhos. Unica animacao permitida depois da parada
+void ledsParada() {
+    directWriteHigh(LED_PIN);
+    xSemaphoreTake(ledsMutex, portMAX_DELAY);
+    for (int i = 0; i < NUM_LEDS; i++) leds[i] = CRGB(200, 0, 0);
+    FastLED.show();
+    xSemaphoreGive(ledsMutex);
 }
 
 // Define todos os 5 LEDs com seus respectivos valores RGB
@@ -99,12 +147,13 @@ void setLeds(
     uint8_t r3, uint8_t g3, uint8_t b3,
     uint8_t r4, uint8_t g4, uint8_t b4
 ) {
+    if (!pegarLeds()) return;
     leds[0] = CRGB(r0, g0, b0);
     leds[1] = CRGB(r1, g1, b1);
     leds[2] = CRGB(r2, g2, b2);
     leds[3] = CRGB(r3, g3, b3);
     leds[4] = CRGB(r4, g4, b4);
-    FastLED.show();
+    mostrarLeds();
 }
 
 // Modo para quando enxerga o robo adversario
@@ -118,20 +167,21 @@ void AnnihilationModeLeds() {
 
 // Apaga todos os LEDs
 void clearLeds() {
+    if (!pegarLeds()) return;
     FastLED.clear();
-    FastLED.show();
+    mostrarLeds();
 }
 
 // Funcao para indicar o status do setup com LEDs verdes (feito) ou vermelhos (pendente)
 void validaSetup(uint8_t s0, uint8_t s1, uint8_t s2, uint8_t s3, uint8_t s4) {
+    if (!pegarLeds()) return;
     // Verde se 1, vermelho se 0
     leds[0] = s0 ? CRGB(0, 200, 0) : CRGB(200, 0, 0);
     leds[1] = s1 ? CRGB(0, 200, 0) : CRGB(200, 0, 0);
     leds[2] = s2 ? CRGB(0, 200, 0) : CRGB(200, 0, 0);
     leds[3] = s3 ? CRGB(0, 200, 0) : CRGB(200, 0, 0);
     leds[4] = s4 ? CRGB(0, 200, 0) : CRGB(200, 0, 0);
-
-    FastLED.show();
+    mostrarLeds();
 }
 
 // Painel de sensores na ordem fisica do robo: JS_E, IR_E, LDR, IR_D e JS_D (roxo = enxerga,
@@ -140,13 +190,13 @@ void indicarSensores(bool jsE, bool irE, bool ldr, bool irD, bool jsD) {
     const CRGB enxerga = CRGB(128, 0, 128);
     const CRGB nada    = CRGB(200, 128, 0);
 
+    if (!pegarLeds()) return;
     leds[0] = jsE ? enxerga : nada;
     leds[1] = irE ? enxerga : nada;
     leds[2] = ldr ? enxerga : nada;
     leds[3] = irD ? enxerga : nada;
     leds[4] = jsD ? enxerga : nada;
-
-    FastLED.show();
+    mostrarLeds();
 }
 
 // Cor que representa cada modo de boot: RC verde, AUTO vermelho, IDLE laranja
@@ -165,26 +215,29 @@ void ledsHeartbeat() {
     ultimoHeartbeat = millis();
 
     uint8_t brilho = beatsin8(40, 10, 200);
+    if (!pegarLeds()) return;
     for (int i = 0; i < NUM_LEDS; i++) leds[i] = CRGB(0, brilho, 0);
-    FastLED.show();
+    mostrarLeds();
 }
 
 // Modos RC e AUTO ja engatados: todos os LEDs na cor do modo
 void ledsModo(BootMode modo) {
     CRGB cor = corModoBoot(modo);
+    if (!pegarLeds()) return;
     for (int i = 0; i < NUM_LEDS; i++) leds[i] = cor;
-    FastLED.show();
+    mostrarLeds();
 }
 
 // Progresso da senha de boot nos 5 LEDs: roxo forte por digito correto (da esquerda para a
 // direita) e roxo fraco nos demais. Com a senha fechada, todos assumem a cor do modo escolhido
 void ledsSenhaBoot(int progresso, bool fechada, BootMode modoEscolhido) {
+    if (!pegarLeds()) return;
     for (int i = 0; i < NUM_LEDS; i++) {
         if (fechada)            leds[i] = corModoBoot(modoEscolhido);
         else if (i < progresso) leds[i] = CRGB(128, 0, 128);
         else                    leds[i] = CRGB(20, 0, 20);
     }
-    FastLED.show();
+    mostrarLeds();
 }
 
 #pragma endregion

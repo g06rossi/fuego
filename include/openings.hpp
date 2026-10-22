@@ -199,12 +199,7 @@ const OpeningStep desempateDireita[] = {
 
 #pragma region TABELAS
 
-// A Curva de Borda e uma funcao (executarCurvaDeBorda), nao uma matriz: avanca ate achar a linha.
-// O dummy so ocupa a posicao dela nas tabelas
-const OpeningStep curvaBordaDummy[] = {
-    {0, 0, 0}
-};
-
+// A Curva de Borda e uma funcao (executarCurvaDeBorda), nao uma matriz: avanca ate achar a linha
 const int curvaBordaVelGiro                 = 230;   // Giros de entrada e de saida (no eixo)
 const unsigned long curvaBordaGiroMs        = 65;    // Giro de entrada
 const int curvaBordaVelAvanco               = 127;   // Avanco ate um sensor de linha ver a borda
@@ -212,55 +207,201 @@ const int curvaBordaVelRe                   = 255;
 const unsigned long curvaBordaReMs          = 80;
 const unsigned long curvaBordaGiroVoltaMs   = 170;   // Giro de saida
 
-const OpeningStep* const TABELA_MACROS_ESQ[] = {
-    frentao,            // 0
-    frentinho,          // 1
-    curvaEsquerda,      // 2
-    curvaoEsquerda,     // 3
-    emVEsquerda,        // 4
-    vzinhoEsquerda,     // 5
-    vzaoEsquerda,       // 6
-    giroEsquerda,       // 7
-    desempateEsquerda,  // 8
-    curvaBordaDummy     // 9
+/*
+!INFO | Iniciacoes padrao, NVS e historico
+-----------------------------------
+As matrizes acima sao os PADROES. No boot, carregarMacros() copia os padroes para macros[] (RAM) e
+aplica por cima o que estiver salvo na NVS: posicoes sobrescritas e posicoes novas criadas pelo
+historico da estrategia personalizada. Tudo que executa, lista ou imprime iniciacoes usa macros[].
+O indice do BT e a posicao + 1
+*/
+
+struct MacroPadrao {
+    const char* nome;
+    const OpeningStep* esq;                   // nullptr = Curva de Borda (funcao, sem matriz)
+    const OpeningStep* dir;
 };
 
-const OpeningStep* const TABELA_MACROS_DIR[] = {
-    frentao,            // 0
-    frentinho,          // 1
-    curvaDireita,       // 2
-    curvaoDireita,      // 3
-    emVDireita,         // 4
-    vzinhoDireita,      // 5
-    vzaoDireita,        // 6
-    giroDireita,        // 7
-    desempateDireita,   // 8
-    curvaBordaDummy     // 9
+const MacroPadrao MACROS_PADRAO[] = {
+    {"Frentao",        frentao,           frentao},
+    {"Frentinho",      frentinho,         frentinho},
+    {"Curva",          curvaEsquerda,     curvaDireita},
+    {"Curvao",         curvaoEsquerda,    curvaoDireita},
+    {"Em V",           emVEsquerda,       emVDireita},
+    {"Vzinho",         vzinhoEsquerda,    vzinhoDireita},
+    {"Vzao",           vzaoEsquerda,      vzaoDireita},
+    {"Giro",           giroEsquerda,      giroDireita},
+    {"Desempate",      desempateEsquerda, desempateDireita},
+    {"Curva de Borda", nullptr,           nullptr},
+};
+const int NUM_MACROS_PADRAO = sizeof(MACROS_PADRAO) / sizeof(MACROS_PADRAO[0]);
+
+struct Macro {
+    char nome[NOME_MACRO_MAX];
+    bool curvaBorda;
+    OpeningStep esq[MAX_STEPS];               // Terminadas em {0, 0, 0}
+    OpeningStep dir[MAX_STEPS];
 };
 
-const int NUM_MACROS = sizeof(TABELA_MACROS_ESQ) / sizeof(TABELA_MACROS_ESQ[0]);
+Macro macros[MAX_MACROS];
+int numMacros = 0;
+
+// Ultimas personalizadas enviadas (buffer circular). No menu, 1 = a mais nova
+OpeningStep historico[HISTORICO_TAMANHO][MAX_STEPS];
+int historicoQtd = 0;
+int historicoProximo = 0;
 
 #pragma endregion
 
 //===============================================================================================//
-//======================================//NOMES DAS MACROS//=====================================//
+//===================================//INICIACOES NA NVS//=======================================//
 //===============================================================================================//
 
-#pragma region NOMES
+#pragma region INICIACOES NVS
 
-// Nomes na mesma ordem das tabelas TABELA_MACROS_ESQ / TABELA_MACROS_DIR (indice BT = posicao + 1)
-const char* const NOMES_MACROS[] = {
-    "Frentao",
-    "Frentinho",
-    "Curva",
-    "Curvao",
-    "Em V",
-    "Vzinho",
-    "Vzao",
-    "Giro",
-    "Desempate",
-    "Curva de Borda"
+int contarPassos(const OpeningStep* passos) {
+    int n = 0;
+    while (n < MAX_STEPS - 1 && passos[n].delayMs > 0) n++;
+    return n;
+}
+
+// Copia a matriz e fecha com {0, 0, 0}. Espelhar troca as rodas: transforma a versao de um lado
+// na do outro
+void copiarPassos(OpeningStep* destino, const OpeningStep* origem, bool espelhar = false) {
+    int n = contarPassos(origem);
+    for (int i = 0; i < n; i++) {
+        destino[i].speedLeft  = espelhar ? origem[i].speedRight : origem[i].speedLeft;
+        destino[i].speedRight = espelhar ? origem[i].speedLeft  : origem[i].speedRight;
+        destino[i].delayMs    = origem[i].delayMs;
+    }
+    destino[n] = {0, 0, 0};
+}
+
+bool passosIguais(const OpeningStep* a, const OpeningStep* b) {
+    int n = contarPassos(a);
+    if (n != contarPassos(b)) return false;
+    for (int i = 0; i < n; i++) {
+        if (a[i].speedLeft != b[i].speedLeft || a[i].speedRight != b[i].speedRight ||
+            a[i].delayMs != b[i].delayMs) return false;
+    }
+    return true;
+}
+
+// Formato compacto na NVS: velocidades cabem em int16 e tempos (ate PASSO_MAX_MS) em uint16
+struct PassoNVS {
+    int16_t velEsq;
+    int16_t velDir;
+    uint16_t tempoMs;
 };
+
+struct MacroNVS {
+    char nome[NOME_MACRO_MAX];
+    uint8_t nEsq;
+    uint8_t nDir;
+    PassoNVS esq[MAX_STEPS - 1];
+    PassoNVS dir[MAX_STEPS - 1];
+};
+
+struct HistoricoNVS {
+    uint8_t n;
+    PassoNVS passos[MAX_STEPS - 1];
+};
+
+uint8_t empacotarPassos(PassoNVS* destino, const OpeningStep* origem) {
+    int n = contarPassos(origem);
+    for (int i = 0; i < n; i++) destino[i] = {(int16_t)origem[i].speedLeft, (int16_t)origem[i].speedRight,
+                                               (uint16_t)origem[i].delayMs};
+    return n;
+}
+
+void desempacotarPassos(OpeningStep* destino, const PassoNVS* origem, uint8_t n) {
+    if (n > MAX_STEPS - 1) n = MAX_STEPS - 1;
+    for (int i = 0; i < n; i++) destino[i] = {origem[i].velEsq, origem[i].velDir, origem[i].tempoMs};
+    destino[n] = {0, 0, 0};
+}
+
+// Padroes do codigo + o que estiver salvo na NVS. Chamar no setup
+void carregarMacros() {
+    numMacros = NUM_MACROS_PADRAO;
+    for (int i = 0; i < NUM_MACROS_PADRAO; i++) {
+        strlcpy(macros[i].nome, MACROS_PADRAO[i].nome, NOME_MACRO_MAX);
+        macros[i].curvaBorda = (MACROS_PADRAO[i].esq == nullptr);
+        if (!macros[i].curvaBorda) {
+            copiarPassos(macros[i].esq, MACROS_PADRAO[i].esq);
+            copiarPassos(macros[i].dir, MACROS_PADRAO[i].dir);
+        }
+    }
+
+    if (!preferences.begin(NVS_NAMESPACE_MACROS, true)) return;   // Nada salvo ainda
+
+    int total = preferences.getUChar("n", NUM_MACROS_PADRAO);
+    if (total > MAX_MACROS) total = MAX_MACROS;
+    char chave[8];
+    MacroNVS registro;
+    for (int i = 0; i < total; i++) {
+        snprintf(chave, sizeof(chave), "m%d", i);
+        if (!preferences.isKey(chave)) continue;
+        if (preferences.getBytes(chave, &registro, sizeof(registro)) != sizeof(registro)) continue;
+        registro.nome[NOME_MACRO_MAX - 1] = '\0';
+        strlcpy(macros[i].nome, registro.nome, NOME_MACRO_MAX);
+        macros[i].curvaBorda = false;
+        desempacotarPassos(macros[i].esq, registro.esq, registro.nEsq);
+        desempacotarPassos(macros[i].dir, registro.dir, registro.nDir);
+        if (i + 1 > numMacros) numMacros = i + 1;
+    }
+
+    historicoQtd = preferences.getUChar("hq", 0);
+    if (historicoQtd > HISTORICO_TAMANHO) historicoQtd = HISTORICO_TAMANHO;
+    historicoProximo = preferences.getUChar("hp", 0) % HISTORICO_TAMANHO;
+    HistoricoNVS item;
+    for (int i = 0; i < HISTORICO_TAMANHO; i++) {
+        snprintf(chave, sizeof(chave), "h%d", i);
+        historico[i][0] = {0, 0, 0};
+        if (preferences.isKey(chave) && preferences.getBytes(chave, &item, sizeof(item)) == sizeof(item)) {
+            desempacotarPassos(historico[i], item.passos, item.n);
+        }
+    }
+    preferences.end();
+}
+
+// Grava a iniciacao da posicao (base 0) na NVS. Devolve false se a NVS nao abrir
+bool salvarMacroNVS(int posicao) {
+    if (!preferences.begin(NVS_NAMESPACE_MACROS, false)) return false;
+    MacroNVS registro = {};
+    strlcpy(registro.nome, macros[posicao].nome, NOME_MACRO_MAX);
+    registro.nEsq = empacotarPassos(registro.esq, macros[posicao].esq);
+    registro.nDir = empacotarPassos(registro.dir, macros[posicao].dir);
+    char chave[8];
+    snprintf(chave, sizeof(chave), "m%d", posicao);
+    preferences.putBytes(chave, &registro, sizeof(registro));
+    preferences.putUChar("n", numMacros);
+    preferences.end();
+    return true;
+}
+
+// Item do historico na ordem do menu (1 = mais nova)
+OpeningStep* historicoItem(int indice) {
+    return historico[(historicoProximo - indice + 2 * HISTORICO_TAMANHO) % HISTORICO_TAMANHO];
+}
+
+// Guarda a matriz como a mais nova do historico (a mais antiga sai) e grava na NVS
+bool adicionarHistorico(const OpeningStep* passos) {
+    int posicao = historicoProximo;
+    copiarPassos(historico[posicao], passos);
+    historicoProximo = (historicoProximo + 1) % HISTORICO_TAMANHO;
+    if (historicoQtd < HISTORICO_TAMANHO) historicoQtd++;
+
+    if (!preferences.begin(NVS_NAMESPACE_MACROS, false)) return false;
+    HistoricoNVS item = {};
+    item.n = empacotarPassos(item.passos, historico[posicao]);
+    char chave[8];
+    snprintf(chave, sizeof(chave), "h%d", posicao);
+    preferences.putBytes(chave, &item, sizeof(item));
+    preferences.putUChar("hq", historicoQtd);
+    preferences.putUChar("hp", historicoProximo);
+    preferences.end();
+    return true;
+}
 
 #pragma endregion
 
@@ -387,7 +528,7 @@ void executarCurvaDeBorda() {
 
     // Passo 2: Avanco ate achar a linha
     moverMotores(curvaBordaVelAvanco, curvaBordaVelAvanco);
-    while (!value_QRE_E && !value_QRE_D) {
+    while (!value_QRE_E && !value_QRE_D && !roboParado) {   // Travado pelo IR 3 nunca chegaria
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 
@@ -403,23 +544,19 @@ void executarCurvaDeBorda() {
     moverMotores(0, 0);
 }
 
-// Executa a iniciacao escolhida nas etapas do BT (macro da tabela, personalizada ou nenhuma)
+// Executa a iniciacao escolhida nas etapas do BT (macro de macros[] ou nenhuma)
 void openingsLutaBT() {
     const OpeningStep* sequencia = nullptr;
 
-    if (modoBT == MODO_PERSONALIZADA) {
-        SerialBT.println("//=====//ESTRATEGIA PERSONALIZADA INICIADA//=====//");
-        sequencia = customOpening;
+    if (macroIndex > 0 && macroIndex <= numMacros) {
+        Macro& macro = macros[macroIndex - 1];
+        SerialBT.printf("//=====//%s INICIADO//=====//\n", macro.nome);
 
-    } else if (macroIndex > 0 && macroIndex <= NUM_MACROS) {
-        SerialBT.printf("//=====//%s INICIADO//=====//\n", NOMES_MACROS[macroIndex - 1]);
-        
-        if (TABELA_MACROS_ESQ[macroIndex - 1] == curvaBordaDummy) {
+        if (macro.curvaBorda) {
             executarCurvaDeBorda();
             return;
-        } else {
-            sequencia = (direction == direita ? TABELA_MACROS_DIR : TABELA_MACROS_ESQ)[macroIndex - 1];
         }
+        sequencia = (direction == direita) ? macro.dir : macro.esq;
     }
 
     if (sequencia != nullptr) {
@@ -430,41 +567,6 @@ void openingsLutaBT() {
         definirJSumos(!furtivoMovimentacao);
         abrirAsaAntesDeMover();
         moverMotores(0, 0);
-    }
-}
-
-#pragma endregion
- 
-//===============================================================================================//
-//===================================//CONFIG ESTRATEGIA NOVA//==================================//
-//===============================================================================================//
-
-#pragma region PERSONALIZACAO
-
-// Interpreta e armazena o passo da estrategia personalizada
-void parseAndStoreStep(const char* buffer) {
-    int vel_esq, vel_dir, delay_ms;           // Variaveis para armazenar os valores parseados
-
-    // Usa sscanf para parsear os tres inteiros separados por virgula
-    int num_parsed = sscanf(buffer, "%d,%d,%d", &vel_esq, &vel_dir, &delay_ms);
-
-    if (num_parsed != 3) {                    // Se nao tem 3 valores, o formato esta incorreto
-        SerialBT.println("Formato invalido! Use: vel_esq,vel_dir,delay");
-        Serial.println("Formato invalido! Use: vel_esq,vel_dir,delay");
-        return;
-    }
-
-    if (customOpeningCount < (MAX_STEPS - 1)) {    // Verifica se ha espaco disponivel no array
-        customOpening[customOpeningCount].speedLeft = vel_esq;
-        customOpening[customOpeningCount].speedRight = vel_dir;
-        customOpening[customOpeningCount].delayMs = delay_ms;
-        customOpeningCount++;                // Incrementa o contador de passos
-        
-        Serial.printf("Passo adicionado: E:%d, D:%d, Delay:%dms\n", vel_esq, vel_dir, delay_ms);
-        SerialBT.printf("Passo adicionado: E:%d, D:%d, Delay:%dms\n", vel_esq, vel_dir, delay_ms);
-    } else {
-        SerialBT.println("Limite de passos da estratégia atingido!");
-        Serial.println("Limite de passos da estratégia atingido!");
     }
 }
 
@@ -483,6 +585,7 @@ void openingsTask(void *pvParameters) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         resetFightingState();               // Reseta as variaveis de luta
         openingsLutaBT();                   // Executa a iniciacao selecionada nas etapas BT
+        if (roboParado) continue;           // IR 3 durante a iniciacao: a luta nunca comeca
         tempoFighting = millis();
         running = true;                       // Ativa o robo
     }

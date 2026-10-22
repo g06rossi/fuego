@@ -50,10 +50,10 @@ const unsigned long pulsoQuantidade       = 6;
 // Retorno (linha detectada)
 const int velRetornoRecuo                 = 255;
 const int velRetornoGiro                  = 255;
-int retornoRecuoLateralMs                 = 200;   // Linha vista por 1 sensor (configuravel via NVS)
-int retornoGiroLateralMs                  = 160;   // (configuravel via NVS)
-int retornoRecuoFrontalMs                 = 250;   // Linha vista pelos 2 sensores (configuravel via NVS)
-int retornoGiroFrontalMs                  = 225;   // (configuravel via NVS)
+int retornoRecuoLateralMs                 = 160;   // Linha vista por 1 sensor (configuravel via NVS)
+int retornoGiroLateralMs                  = 95;   // (configuravel via NVS)
+int retornoRecuoFrontalMs                 = 200;   // Linha vista pelos 2 sensores (configuravel via NVS)
+int retornoGiroFrontalMs                  = 100;   // (configuravel via NVS)
 
 // Desengate (LDR apagou apos ataque): varredura em S
 const int velDesengateInterna             = 140;   // Roda interna da curva

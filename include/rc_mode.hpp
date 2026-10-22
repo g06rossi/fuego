@@ -22,7 +22,7 @@
 
 // Coeficientes para balancear a re de cada motor, em % (100 = 1.0, sem atenuacao). Configuraveis via NVS
 int coefReversoEsq             = 100;
-int coefReversoDir             = 83;
+int coefReversoDir             = 90;
 
 volatile bool velLimitada      = false;       // Switch definido pra limitar a velocidade do motor
 int limiteVelocidade           = 255;         // Limite de velocidade do motor
@@ -61,7 +61,7 @@ void modoRC() {
     // Tenta conectar ao controle PS4 e debuga conexao pelo Serial Monitor
     if (PS4.begin(FUEGO)) {
         Serial.println("Bluetooth inicializado, aguardando controle...");
-        xTaskNotifyGive(swSensorHandle);      // Entra no modo furtivo
+        definirJSumos(false);                 // Entra no modo furtivo
 
         while (!PS4.isConnected()) {
             directWriteHigh(LED_PIN);
@@ -82,7 +82,8 @@ void modoRC() {
     directWriteLow(LED_PIN);
 
     while (PS4.isConnected()) {
-        
+        vTaskDelay(pdMS_TO_TICKS(1));         // Cede o nucleo 1 a cada leitura do controle
+
         int velocidadeEsquerda = 0;           // Velocidade do motor esquerdo
         int velocidadeDireita = 0;            // Velocidade do motor direito
 
@@ -220,7 +221,7 @@ void modoRC() {
             moverMotores(velocidadeEsquerda, velocidadeDireita);
         }
     }
-    brakeMotors();                            // Se desconectar, freia o motor
+    moverMotores(0, 0);                       // Se desconectar, freia o motor
 }
 
 #pragma endregion

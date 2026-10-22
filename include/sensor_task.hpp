@@ -20,29 +20,39 @@
 
 #pragma region PARAR ROBO
 
+// IR 3: freia primeiro, sinaliza depois. Nada que possa bloquear (LEDs, BT) vem antes do freio
 void stopRobot(void *pvParameters) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    for(;;) {
-        SerialBT.println("PAROU");
-        running = false;                      // Para os loops de Defensivo e Ofensivo
-        brakeMotors();                        // Trava os motores
-        vTaskDelay(pdMS_TO_TICKS(1000));      // Delay para garantir a parada
+    travarMotores();                          // roboParado + running = false + freio
+
+    ledsParada();                             // LED embutido aceso e enderecaveis vermelhos
+    SerialBT.println("//=====//PAROU (IR 3): motores travados ate reiniciar//=====//");
+    Serial.println("//=====//PAROU (IR 3): motores travados ate reiniciar//=====//");
+
+    for (;;) {
+        brakeMotors();                        // Reforca o freio a cada 1 s
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 
-void irMonitorTask(void *pvParameters) {      // Monitora a cada 100 ms se o robo deve parar 
+void irMonitorTask(void *pvParameters) {      // Le o receptor IR a cada IR_LEITURA_MS
+    // Iniciado aqui, e nao no setup (nucleo 1), para a ISR de 50 us do IRremote ficar no nucleo 0
+    // e nao interromper a logica de combate
+    IrReceiver.begin(IR_RECIEVE_PIN, DISABLE_LED_FEEDBACK, LED_PIN);
+
     for (;;) {
         if (IrReceiver.decode()) {
-            // Armazena o comando decodificado em uma variavel global
-            ultimoComandoIR = IrReceiver.decodedIRData.command;
-            // Se recebe IR 3 (0x2), notifica a task de parada
-            if (ultimoComandoIR == 0x2) {
-                blinkLED(8, 25);
-                xTaskNotifyGive(stopRobotHandle);
-            }
+            uint16_t comando = IrReceiver.decodedIRData.command;
             IrReceiver.resume();
+
+            if (comando == 0x2) {             // IR 3: parada definitiva
+                xTaskNotifyGive(stopRobotHandle);
+            } else {
+                xQueueSend(irQueue, &comando, 0);   // Fila cheia: descarta (ninguem esta lendo)
+                if (largadaLiberada) xTaskNotifyGive(IRCommandHandle);
+            }
         }
-        vTaskDelay(pdMS_TO_TICKS(100));       // 100 ms para as outras tarefas serem executadas
+        vTaskDelay(pdMS_TO_TICKS(IR_LEITURA_MS));
     }
 }
 
@@ -51,19 +61,6 @@ void irMonitorTask(void *pvParameters) {      // Monitora a cada 100 ms se o rob
 //===============================================================================================//
 //====================================//LEITURA DOS SENSORES//===================================//
 //===============================================================================================//
-
-//======================================//Desliga Sensores//=====================================//
-
-#pragma region DESLIGA SENSOR
-
-void switchSensor(void *pvParameters) {
-    for (;;) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        definirJSumos(!gndLigado);            // Alterna o NMOS que conecta o GND dos JSumos
-    }
-}
-
-#pragma endregion
 
 //======================================//Leitura Sensores//=====================================//
 
@@ -86,9 +83,8 @@ void IRAM_ATTR readSensors() {
 
     // Variavel para verificar se uma tarefa de maior prioridade foi despertada
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    // Dispara a leitura de linha e LDR e a logica de combate no mesmo ciclo
+    // Dispara a leitura de linha e LDR; ela acorda a logica de combate quando termina
     vTaskNotifyGiveFromISR(analogSensorHandle, &xHigherPriorityTaskWoken);
-    vTaskNotifyGiveFromISR(fightingLogicHandle, &xHigherPriorityTaskWoken);
     if (xHigherPriorityTaskWoken) {           // Se uma tarefa de maior prioridade foi despertada
         portYIELD_FROM_ISR();                 // Forca desligamento do robo (prioridade maior)
     }
@@ -104,14 +100,20 @@ void IRAM_ATTR readSensors() {
 !INFO | Linha e LDR analogicos
 -----------------------------------
 O ADC nao pode ser lido dentro da ISR, por isso linha e LDR sao lidos nesta task, que a ISR acorda
-a cada ciclo de 300us. Linha: ADC abaixo de LINHA_TRESHOLD = linha branca. LDR: media movel de
+a cada ciclo do timer. Ao terminar, ela acorda a fightingLogicTask, que assim sempre decide com as
+leituras do ciclo atual. Linha: ADC abaixo de LINHA_TRESHOLD = linha branca. LDR: media movel de
 LDR_JANELA_FILTRO amostras (atenua o ruido dos motores) e abaixo de LDR_TRESHOLD = sombra do
 adversario na rampa. Os pinos precisam ser do ADC1 (GPIO 32-39)
 
 Nao use analogRead aqui: no core Arduino 2.x ele refaz pinMode e atenuacao a cada chamada, e 3
 leituras passam de 300us. A task entao ocupa 100% do nucleo 0, a IDLE0 nao roda e o watchdog
 de tarefas reinicia o ESP. O ADC e configurado uma vez e lido com adc1_get_raw
+
+O timer dos sensores e ligado por esta task (nucleo 0), e nao pelo setup (nucleo 1): a ISR fica no
+mesmo nucleo da task que ela acorda, e o nucleo 1 fica so com o combate
 */
+void startTimer();
+
 void analogSensorTask(void *pvParameters) {
     adc1_channel_t canalLinhaE = (adc1_channel_t)digitalPinToAnalogChannel(LINHA_ESQ_PIN);
     adc1_channel_t canalLinhaD = (adc1_channel_t)digitalPinToAnalogChannel(LINHA_DIR_PIN);
@@ -128,6 +130,11 @@ void analogSensorTask(void *pvParameters) {
     for (int i = 0; i < LDR_JANELA_FILTRO; i++) amostrasLdr[i] = inicial;
     uint32_t somaLdr = (uint32_t)inicial * LDR_JANELA_FILTRO;
     int indiceLdr = 0;
+
+    // O handle precisa existir antes da primeira ISR: aqui a task pode rodar antes de o
+    // xTaskCreatePinnedToCore que a criou devolver o handle
+    analogSensorHandle = xTaskGetCurrentTaskHandle();
+    startTimer();
 
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);   // Acordada pela ISR dos sensores
@@ -150,6 +157,9 @@ void analogSensorTask(void *pvParameters) {
         value_QRE_D = linhaD < LINHA_TRESHOLD;
         value_LDR = ldrFiltrado < LDR_TRESHOLD;
 
+        // Com as leituras deste ciclo prontas, acorda a logica de combate (so durante a luta)
+        if (running) xTaskNotifyGive(fightingLogicHandle);
+
         uint32_t duracao = (uint32_t)(esp_timer_get_time() - inicioCiclo);
         if (duracao > adcCicloMaxUs) adcCicloMaxUs = duracao;
         // Protecao: se o ciclo ficou longo demais, cede o nucleo 0 para a IDLE0 alimentar o watchdog
@@ -163,13 +173,12 @@ void analogSensorTask(void *pvParameters) {
 
 #pragma region INTERPRETA IR
 
+// Acordada pela irMonitorTask a cada comando IR, so depois de o modoAUTO liberar a largada
 void handleIRCommand(void *pvParameters) {
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);  // Aguarda notificacao
     for (;;) {
-        if (ultimoComandoIR != 0xFFFF) {      // Verifica se há um comando IR recebido
-            uint16_t comandoAtual = ultimoComandoIR;
-            ultimoComandoIR = 0xFFFF;
-
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        uint16_t comandoAtual;
+        while (largadaLiberada && receberComandoIR(comandoAtual)) {
             // Indica estar pronto para AUTO se recebe 1 (0x0) do controle
             if (comandoAtual == 0x0) {
                 Serial.println("Pronto");
@@ -179,14 +188,13 @@ void handleIRCommand(void *pvParameters) {
                 blinkLED(1, 25);              // Pisca o LED builtin se recebe IR 1
             }
 
-            // Inicia movimento AUTO se recebe 2 (0x1) do controle
-            if (comandoAtual == 0x1 && ready) {
+            // Inicia movimento AUTO se recebe 2 (0x1) do controle. Depois de um IR 3, nunca mais
+            if (comandoAtual == 0x1 && ready && !roboParado) {
                 // Notifica a task de estrategia
                 clearLeds();                  // Apaga LEDs enderecaveis
+                largadaLiberada = false;      // Nao recebe mais comandos: fica bloqueada para sempre
                 xTaskNotifyGive(openingsHandle);
-                vTaskDelete(NULL);            // Encerra esta task
             }
-            IrReceiver.resume();              // Limpa o buffer IR
         }
     }
 }
@@ -294,7 +302,7 @@ instantanea da estrategia atual por uma de maior prioridade baseada em novas lei
 void startTimer() {
     sensorTimer = timerBegin(0, 80, true);    // Timer de 80 ticks
     timerAttachInterrupt(sensorTimer, &readSensors, true); // Qual funcao sera acordada
-    timerAlarmWrite(sensorTimer, 300, true);  // Definir tempo (µs) aqui
+    timerAlarmWrite(sensorTimer, PERIODO_SENSORES_US, true);  // Periodo em us (configuravel via NVS)
     timerAlarmEnable(sensorTimer);            // Ligar o timer
 }
 
@@ -305,12 +313,14 @@ void startTimer() {
 #pragma region TASK ALOCACAO
 
 void setupSensorTask() {
+    irQueue = xQueueCreate(IR_FILA_TAMANHO, sizeof(uint16_t));   // Antes da irMonitorTask
+
     xTaskCreatePinnedToCore(                  // Parar o robo
         stopRobot,                            // Funcao da tarefa
         "StopRobot",                          // Nome da tarefa
         256 * 16,                             // Tamanho da pilha
         nullptr,                              // Parametros
-        17,                                   // Prioridade 16
+        17,                                   // Prioridade 17: a maior das tasks do projeto
         &stopRobotHandle,                     // Handle
         PRO_CPU_NUM                           // Nucleo 0 onde a tarefa sera executada
     );
@@ -320,28 +330,18 @@ void setupSensorTask() {
         "IR_Monitor",                         // Nome da tarefa
         256 * 16,                             // Tamanho da pilha
         nullptr,                              // Parametros
-        16,                                   // Prioridade 16
+        15,                                   // Prioridade 15 (abaixo da leitura de linha)
         NULL,                                 // Handle
         PRO_CPU_NUM                           // Nucleo 0 onde a tarefa sera executada
     );
     
-    xTaskCreatePinnedToCore(                  // Ligar e desligar os sensores
-        switchSensor,                         // Funcao da tarefa
-        "SwitchSensor",                       // Nome da tarefa
-        256 * 16,                             // Tamanho da pilha
-        nullptr,                              // Parametros
-        15,                                   // Prioridade 15
-        &swSensorHandle,                      // Handle
-        PRO_CPU_NUM                           // Nucleo 0 onde a tarefa sera executada
-    );
-    
-    xTaskCreatePinnedToCore(                  // Le linha e LDR (analogicos)
+    xTaskCreatePinnedToCore(                  // Le linha e LDR (analogicos) e liga o timer dos sensores
         analogSensorTask,                     // Funcao da tarefa
         "AnalogSensor",                       // Nome da tarefa
         256 * 16,                             // Tamanho da pilha
         nullptr,                              // Parametros
-        15,                                   // Prioridade 15
-        &analogSensorHandle,                  // Handle (a ISR notifica, criar antes do timer)
+        16,                                   // Prioridade 16: a linha e a leitura mais critica
+        NULL,                                 // Handle: a propria task preenche antes de ligar o timer
         PRO_CPU_NUM                           // Nucleo 0 onde a tarefa sera executada
     );
 
@@ -364,8 +364,6 @@ void setupSensorTask() {
         &fightingLogicHandle,                   // Handle
         APP_CPU_NUM                           // Nucleo 1 onde a tarefa sera executada
     );
-    
-    startTimer();                             // Configurar o timer dos sensores
 }
 
 #pragma endregion

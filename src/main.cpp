@@ -75,6 +75,7 @@
 void setup() {
     Serial.begin(115200);                     // Comunicacao serial com baudrate 115200
     carregarPinConfig();                      // Carrega pinos/thresholds da NVS antes de usar
+    carregarMacros();                         // Iniciacoes padrao + as salvas na NVS e o historico
 
     // Configura os pinos do ESP
     pinMode(NMOS_PIN, OUTPUT);
@@ -101,24 +102,24 @@ void setup() {
     vTaskDelay(pdMS_TO_TICKS(100));           // Pequeno atraso para protecao
 
     currentBootMode = carregarBootMode();     // Modo gravado na NVS (IDLE se nao houver)
-
-    // Comunicacao por IR -> DEVE FICAR NO SETUP
-    // Feedback automatico desativado -> Feedback LED configurado manualmente
-    IrReceiver.begin(IR_RECIEVE_PIN, DISABLE_LED_FEEDBACK, LED_PIN);
-    printActiveIRProtocols(&Serial);
-    Serial.println("\n\n//=====//Setup IR feita//=====//");
+    Serial.println("//=====//Setup NVS feita//=====//");
     validaSetup(1,0,0,0,0);                   // 4 vermelhos e 1 verde
 
 //================================//Criacao da tarefa nos nucleos//==============================//
 
-    setupSensorTask();                        // Configura as tarefas de sensoreamento
-    Serial.println("//=====//Setup sensor feita//=====//");
-    vTaskDelay(pdMS_TO_TICKS(100));           // Pequeno atraso para protecao
-    validaSetup(1,1,0,0,0);                   // 3 vermelhos e 2 verdes
-
+    // Motores e servo antes dos sensores: o timer e as tasks de sensor (inclusive a parada do IR 3)
+    // podem comandar os motores, entao o LEDC precisa estar configurado antes
     setupMoveTask();                          // Configura as tarefas de motores
     Serial.println("//=====//Setup motor feita//=====//");
     xTaskNotifyGive(closeServoHandle);
+    vTaskDelay(pdMS_TO_TICKS(100));           // Pequeno atraso para protecao
+    validaSetup(1,1,0,0,0);                   // 3 vermelhos e 2 verdes
+
+    // Tasks de sensor: a irMonitorTask inicia o receptor IR e a analogSensorTask liga o timer, as
+    // duas no nucleo 0, para as ISRs nao interromperem o combate no nucleo 1
+    setupSensorTask();                        // Configura as tarefas de sensoreamento
+    printActiveIRProtocols(&Serial);
+    Serial.println("//=====//Setup sensores e IR feita//=====//");
     vTaskDelay(pdMS_TO_TICKS(100));           // Pequeno atraso para protecao
     validaSetup(1,1,1,0,0);                   // 2 vermelhos e 3 verdes
     vTaskDelay(pdMS_TO_TICKS(100));           // Pequeno atraso para protecao
@@ -143,19 +144,14 @@ void __init__() {
         Serial.println("//=====//Selecione modo de luta (IDLE)//=====//");
 
         while (currentBootMode == BOOT_IDLE) {
-            bootSenhaProcessar();             // Janela da senha de boot por IR
+            // Janela da senha de boot por IR; o que nao for da senha volta para ca
+            int comandoAtual = bootSenhaProcessar();
             if (bootSenhaProgresso == 0 && !bootSenhaFechada) ledsHeartbeat();
 
-            if (ultimoComandoIR != 0xFFFF) {
-                uint16_t comandoAtual = ultimoComandoIR;
-                ultimoComandoIR = 0xFFFF;
-
-                if (comandoAtual == 0x7) {    // Inicia modo AUTO se recebe 8 (0x7) do controle
-                    currentBootMode = BOOT_AUTO;
-
-                } else if (comandoAtual == 0x8) { // Inicia modo RC se recebe 9 (0x8) do controle
-                    currentBootMode = BOOT_RC;
-                }
+            if (comandoAtual == 0x7) {        // Inicia modo AUTO se recebe 8 (0x7) do controle
+                currentBootMode = BOOT_AUTO;
+            } else if (comandoAtual == 0x8) { // Inicia modo RC se recebe 9 (0x8) do controle
+                currentBootMode = BOOT_RC;
             }
             vTaskDelay(pdMS_TO_TICKS(10));    // Delay para o FreeRTOS
         }
