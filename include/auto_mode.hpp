@@ -111,6 +111,7 @@ const char* nomeModoBT() {
         case MODO_MACROS:        return "Macros (ver valores das iniciacoes)";
         case MODO_RAPIDA_JSUMO_LIGADO:    return "Rapida JSumo Ligado";
         case MODO_RAPIDA_JSUMO_DESLIGADO: return "Rapida JSumo Desligado";
+        case MODO_LOG_SENSORES:  return "Log de sensores";
         default:                 return "Luta";
     }
 }
@@ -129,13 +130,17 @@ void aplicarPresetRapido() {
     furtivoMovimentacao = (modoBT == MODO_RAPIDA_JSUMO_DESLIGADO);
 }
 
-const char* nomeAdversario() {
-    switch (tipoAdversario) {
+const char* nomeAdversarioDe(TipoAdversario tipo) {
+    switch (tipo) {
         case advRampaSemIR:    return "Rampa Simples sem IR";
         case advAsaSemEmissor: return "Asa Sem Emissor";
         case advAsaComEmissor: return "Asa Com Emissor";
         default:               return "Rampa Simples com IR";
     }
+}
+
+const char* nomeAdversario() {
+    return nomeAdversarioDe(tipoAdversario);
 }
 
 const char* nomeMovimento() {
@@ -201,7 +206,8 @@ void printTabelaEtapa() {
                   "  6    | Rapida JSumo Ligado\n"
                   "  7    | Rapida JSumo Desligado (furtivo)\n"
                   "       | Rapidas: Rampa c/ IR, asa aberta, Busca Defensiva,\n"
-                  "       | finalizacao por LDR. So pergunta iniciacao e direcao\n");
+                  "       | finalizacao por LDR. So pergunta iniciacao e direcao\n"
+                  "  8    | Log de sensores (Busca Linha gravando, sugere limiares)\n");
             break;
 
         case STAGE_ADVERSARY:
@@ -318,7 +324,7 @@ void aplicarSelecao(int indice) {
 
     switch (currentStage) {
         case STAGE_MODE:
-            if (indice >= MODO_LUTA && indice <= MODO_RAPIDA_JSUMO_DESLIGADO) {
+            if (indice >= MODO_LUTA && indice <= MODO_LOG_SENSORES) {
                 modoBT = (ModoBT)indice;
                 if (modoRapido()) aplicarPresetRapido();
             } else valido = false;
@@ -962,6 +968,568 @@ void menuPersonalizada() {
 #pragma endregion
 
 //===============================================================================================//
+//======================================//LOG DE SENSORES//======================================//
+//===============================================================================================//
+
+#pragma region LOG DE SENSORES
+
+/*
+!INFO | Log de sensores (modo 8)
+-----------------------------------
+Roda a Busca Linha pura (com Retorno na linha, sem ataque por LDR) por LOG_DURACAO_MS gravando as
+linhas e o LDR (ver registrarLog), para e grava o log na NVS. Depois imprime as leituras, sugere
+limiares e deixa escolher entre usa-los (salva e reinicia) ou reiniciar sem salvar
+*/
+
+#define NVS_NAMESPACE_LOG      "fuego_log"    //  AUTO | Namespace da NVS do ultimo log de sensores
+
+// Grava o log na NVS se couber (cada entrada da NVS guarda 32 bytes de dados)
+bool salvarLogNVS() {
+    if (!preferences.begin(NVS_NAMESPACE_LOG, false)) return false;
+    preferences.remove("d");                  // Libera o log anterior antes de medir o espaco
+    size_t tamanho = logQtd * sizeof(AmostraLog);
+    bool cabe = preferences.freeEntries() > tamanho / 32 + 4;
+    if (cabe) {
+        preferences.putUShort("n", logQtd);
+        preferences.putBytes("d", logSensores, tamanho);
+    }
+    preferences.end();
+    return cabe;
+}
+
+void printLogSensores() {
+    logBT("\n//=====//LOG DE SENSORES (menor valor de cada janela de %d ms)//=====//\n"
+          "Amostra | t (ms) | Linha E | Linha D |  LDR\n"
+          "--------|--------|---------|---------|------\n", LOG_JANELA_MS);
+    for (int i = 0; i < logQtd; i++) {
+        logBT("  %4d  | %6d |  %5d  |  %5d  | %4d\n", i, (i + 1) * LOG_JANELA_MS,
+              logSensores[i].linhaE, logSensores[i].linhaD, logSensores[i].ldr);
+        if (i % 50 == 49) vTaskDelay(pdMS_TO_TICKS(20));   // Folga para o buffer do BT esvaziar
+    }
+}
+
+int compararUint16(const void* a, const void* b) {
+    return (int)*(const uint16_t*)a - (int)*(const uint16_t*)b;
+}
+
+// Mediana e minimo de um dos campos do log. A mediana representa o preto (ou a luz ambiente, no
+// LDR), porque a maior parte do teste e no preto; o minimo e o branco (ou a sombra)
+void estatisticaLog(size_t campo, int& minimo, int& mediana) {
+    static uint16_t valores[LOG_AMOSTRAS];
+    for (int i = 0; i < logQtd; i++) {
+        valores[i] = *(const uint16_t*)((const uint8_t*)&logSensores[i] + campo);
+    }
+    qsort(valores, logQtd, sizeof(uint16_t), compararUint16);
+    minimo = valores[0];
+    mediana = valores[logQtd / 2];
+}
+
+void executarLogSensores() {
+    logBT("\n//=====//LOG DE SENSORES//=====//\n"
+          "Busca Linha por %d s gravando as linhas e o LDR a cada %d ms (%d amostras)\n"
+          "Coloque o robo no dohyo. Para sugerir o limiar do LDR, faca sombra nele durante o teste\n",
+          LOG_DURACAO_MS / 1000, LOG_JANELA_MS, LOG_AMOSTRAS);
+    avisarSeTravado();
+    if (!aguardarLargada()) reiniciarESP();   // 'x' cancela o teste
+
+    // Busca Linha pura: finalizacao por tempo sem fim desliga o ataque por LDR e a troca de modo
+    modoLuta = buscaLinha;
+    modoLutaOriginal = buscaLinha;
+    finalization = FIM_TEMPO;
+    tempoFinalizacaoMs = ULONG_MAX;
+    resetFightingState();
+    iniciarLog();
+    tempoFighting = millis();
+    running = true;
+    logBT("//=====//GRAVANDO...//=====//\n");
+
+    while (logAtivo) vTaskDelay(pdMS_TO_TICKS(10));
+
+    running = false;
+    vTaskDelay(pdMS_TO_TICKS(PARADA_REFORCO_MS));   // A luta pode estar terminando um comando
+    moverMotores(0, 0);
+    logBT("//=====//TESTE CONCLUIDO: robo parado//=====//\n");
+
+    if (salvarLogNVS()) logBT("Log salvo na NVS.\n");
+    else logBT("AVISO: sem espaco na NVS, o log NAO foi salvo (so esta impressao).\n");
+
+    int brancoE, pretoE, brancoD, pretoD, escuro, claro;
+    estatisticaLog(offsetof(AmostraLog, linhaE), brancoE, pretoE);
+    estatisticaLog(offsetof(AmostraLog, linhaD), brancoD, pretoD);
+    estatisticaLog(offsetof(AmostraLog, ldr), escuro, claro);
+    int sugestaoLinha = sugerirLimiarLinha(brancoE, pretoE, brancoD, pretoD);
+    int sugestaoLdr = sugerirLimiarLdr(escuro, claro);
+
+    for (;;) {
+        printLogSensores();
+        logBT("\n//=====//SUGESTAO DE LIMIARES//=====//\n"
+              "Linha E: branco %d / preto %d | Linha D: branco %d / preto %d\n"
+              "LDR: escuro %d / claro %d\n", brancoE, pretoE, brancoD, pretoD, escuro, claro);
+        if (sugestaoLinha < 0) logBT("Linha: sem contraste (algum sensor nao viu a linha). Atual: %d\n", LINHA_TRESHOLD);
+        else logBT("Linha: sugerido %d (atual %d)\n", sugestaoLinha, LINHA_TRESHOLD);
+        if (sugestaoLdr < 0) logBT("LDR: sem contraste (nao houve sombra no teste). Atual: %d\n", LDR_TRESHOLD);
+        else logBT("LDR: sugerido %d (atual %d)\n", sugestaoLdr, LDR_TRESHOLD);
+
+        logBT("\nIndice | Opcao\n"
+              "-------|---------------------------------------\n"
+              "  0    | Usar os limiares sugeridos (salva na NVS e reinicia)\n"
+              "  1    | Reiniciar sem salvar\n"
+              "  2    | Reimprimir o log\n\n");
+
+        int opcao = indiceDaLinha(esperarLinhaBT());
+        if (opcao == 0) {
+            if (sugestaoLinha < 0 && sugestaoLdr < 0) {
+                logBT("Nenhum limiar sugerido para aplicar.\n");
+                continue;
+            }
+            if (sugestaoLinha >= 0) LINHA_TRESHOLD = sugestaoLinha;
+            if (sugestaoLdr >= 0) LDR_TRESHOLD = sugestaoLdr;
+            salvarPinConfig();
+            logBT("Limiares salvos: linha %d | LDR %d\n", LINHA_TRESHOLD, LDR_TRESHOLD);
+            reiniciarESP();
+        }
+        if (opcao == 1) reiniciarESP();
+        if (opcao != 2) logBT("Opcao invalida!\n");
+    }
+}
+
+#pragma endregion
+
+//===============================================================================================//
+//=====================================//EXPORTACAO DA LUTA//====================================//
+//===============================================================================================//
+
+#pragma region EXPORTACAO LUTA
+
+/*
+!INFO | Exportacao da luta e da configuracao
+-----------------------------------
+'d' pelo Serial (USB) ou pelo BT exporta em CSV, pelo mesmo canal do pedido, todos os rounds
+guardados na flash (ver guardarRound), do mais antigo ao mais novo. 'l' apaga os que foram
+exportados. O texto e montado na hora, a flash so guarda o binario. 'c' pelo Serial imprime a tabela
+de configuracao (pinos e parametros). Os comandos do Serial sao lidos pela serialComandosTask, que
+roda desde o boot, e nenhum funciona com o robo pronto para lutar
+*/
+#define SERIAL_COMANDOS_MS     50             //  DOIS | Intervalo de leitura dos comandos do Serial (ms)
+
+const char* nomeModoCsv(int modo) {
+    static const char* nomes[] = {"ofensiva", "defensiva", "linha", "pulsada", "retorno", "desengate"};
+    return (modo >= 0 && modo < 6) ? nomes[modo] : "?";
+}
+
+const char* nomeFlancoCsv(int estado) {
+    static const char* nomes[] = {"inativo", "giroEixo", "pivoFora", "pivoVolta", "buscaLinha"};
+    return (estado >= 0 && estado < 5) ? nomes[estado] : "?";
+}
+
+const char* nomeEventoCsv(int tipo) {
+    static const char* nomes[] = {"modo", "flanco", "linhaE", "linhaD", "ldr", "cargaTotal",
+                                  "ldrAtaque", "parada", "fim"};
+    return (tipo >= 0 && tipo < 9) ? nomes[tipo] : "?";
+}
+
+/*
+!INFO | Rounds guardados na flash
+-----------------------------------
+Depois do IR 3 (motores ja travados), a stopRobot guarda a luta da RAM num dos ROUNDS_SLOTS da
+particao spiffs, que o firmware nao usa. Assim a luta sobrevive a reiniciar ou desligar o robo, e
+ate ROUNDS_SLOTS rounds sao exportados juntos depois. Nada disso acontece durante a luta: gravar na
+flash desliga o cache dos dois nucleos.
+Cada slot: cabecalho (configuracao da luta) + amostras + eventos. O cabecalho e gravado por ultimo
+e tem CRC: se a energia cair no meio, o slot fica invalido e e ignorado.
+O round e numerado em ordem (1 = o primeiro desde a ultima limpeza). Com todos os slots ocupados, o
+round novo sobrescreve o mais antigo. 'd' exporta todos em ordem e 'l' apaga so os exportados
+*/
+#define ROUNDS_SLOTS           5              //  AUTO | Rounds guardados na flash ate exportar
+#define ROUND_SLOT_BYTES       0xA000         //  AUTO | Tamanho de um slot (multiplo de 4 KB)
+#define ROUND_DADOS_OFFSET     256            //  AUTO | Inicio das amostras no slot (depois do cabecalho)
+#define ROUND_ESPERA_MS        100            //  AUTO | Espera maxima pelo fechamento do gravador (ms)
+#define ROUND_BLOCO            50             //  AUTO | Amostras lidas da flash por vez na exportacao
+#define ROUND_MAGICA           0x46524E44     //  AUTO | "FRND": identifica um slot gravado
+#define ROUND_VERSAO           1              //  AUTO | Muda quando o formato do slot muda
+#define SETOR_FLASH            4096
+
+#define ROUND_EVENTOS_OFFSET   (ROUND_DADOS_OFFSET + GRAVADOR_AMOSTRAS * sizeof(AmostraLuta))
+static_assert(ROUND_EVENTOS_OFFSET + GRAVADOR_EVENTOS * sizeof(EventoLuta) <= ROUND_SLOT_BYTES,
+              "A luta nao cabe no slot");
+
+struct CabecalhoRound {
+    uint32_t magica;
+    uint16_t versao;
+    uint16_t round;                           // 1 = primeiro desde a ultima limpeza
+    uint16_t amostras;
+    uint16_t eventos;
+    uint32_t crcDados;                        // Amostras + eventos
+    uint8_t adversario;                       // TipoAdversario
+    uint8_t asa;
+    uint8_t direcao;                          // Direction
+    uint8_t movimentacao;                     // ModoLuta escolhido
+    uint8_t furtivo;
+    uint8_t finalizacao;                      // FinalizationMode
+    uint16_t reservado;
+    uint32_t tempoFinalizacaoMs;
+    int32_t limiarLinha;
+    int32_t quedaLinha;
+    int32_t limiarLdr;
+    int32_t periodoUs;
+    int32_t janelaMs;
+    char iniciacao[NOME_MACRO_MAX];
+    uint32_t crcCabecalho;                    // Do cabecalho ate aqui. Sempre o ultimo campo
+};
+static_assert(sizeof(CabecalhoRound) <= ROUND_DADOS_OFFSET, "Cabecalho maior que o espaco reservado");
+
+SemaphoreHandle_t roundsMutex = NULL;         // Gravacao, exportacao e limpeza nao se cruzam
+volatile bool roundProcessado = false;        // A stopRobot ja guardou (ou desistiu de guardar) a luta
+bool roundGuardado = false;                   // A luta da RAM esta na flash
+uint8_t exportadosMask = 0;                   // Slots da ultima exportacao (so eles sao limpos)
+uint16_t exportadosRound[ROUNDS_SLOTS];
+
+const esp_partition_t* particaoRounds() {
+    const esp_partition_t* p = esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
+                                                        ESP_PARTITION_SUBTYPE_DATA_SPIFFS, NULL);
+    return (p && p->size >= ROUNDS_SLOTS * ROUND_SLOT_BYTES) ? p : NULL;
+}
+
+uint32_t crcCabecalho(const CabecalhoRound& c) {
+    return esp_rom_crc32_le(0, (const uint8_t*)&c, offsetof(CabecalhoRound, crcCabecalho));
+}
+
+// Le os cabecalhos dos slots. Devolve a mascara dos slots validos
+uint8_t lerCabecalhos(const esp_partition_t* p, CabecalhoRound* cab) {
+    uint8_t validos = 0;
+    for (int s = 0; s < ROUNDS_SLOTS; s++) {
+        if (esp_partition_read(p, s * ROUND_SLOT_BYTES, &cab[s], sizeof(CabecalhoRound)) != ESP_OK) continue;
+        const CabecalhoRound& c = cab[s];
+        if (c.magica == ROUND_MAGICA && c.versao == ROUND_VERSAO && c.crcCabecalho == crcCabecalho(c) &&
+            c.amostras <= GRAVADOR_AMOSTRAS && c.eventos <= GRAVADOR_EVENTOS) {
+            validos |= 1 << s;
+        }
+    }
+    return validos;
+}
+
+// Slots validos em ordem de round (o mais antigo primeiro). Devolve a quantidade
+int ordenarRounds(const CabecalhoRound* cab, uint8_t validos, int* ordem) {
+    int n = 0;
+    for (int s = 0; s < ROUNDS_SLOTS; s++) {
+        if (!(validos & (1 << s))) continue;
+        int i = n++;
+        while (i > 0 && cab[ordem[i - 1]].round > cab[s].round) {
+            ordem[i] = ordem[i - 1];
+            i--;
+        }
+        ordem[i] = s;
+    }
+    return n;
+}
+
+// Configuracao da luta atual, copiada no cabecalho: depois de reiniciar, a selecao do BT se perde
+void preencherCabecalho(CabecalhoRound& c, uint16_t round) {
+    memset(&c, 0, sizeof(c));
+    c.magica = ROUND_MAGICA;
+    c.versao = ROUND_VERSAO;
+    c.round = round;
+    c.amostras = gravQtd;
+    c.eventos = gravEventosQtd;
+    c.adversario = tipoAdversario;
+    c.asa = abrirAsa;
+    c.direcao = direction;
+    c.movimentacao = gravModoInicial;
+    c.furtivo = furtivoMovimentacao;
+    c.finalizacao = finalization;
+    c.tempoFinalizacaoMs = finalization == FIM_TEMPO ? tempoFinalizacaoMs : 0;
+    c.limiarLinha = LINHA_TRESHOLD;
+    c.quedaLinha = LINHA_QUEDA;
+    c.limiarLdr = LDR_TRESHOLD;
+    c.periodoUs = PERIODO_SENSORES_US;
+    c.janelaMs = GRAVADOR_JANELA_MS;
+    strlcpy(c.iniciacao, (macroIndex > 0 && macroIndex <= numMacros) ? macros[macroIndex - 1].nome : "nenhuma",
+            NOME_MACRO_MAX);
+    c.crcDados = esp_rom_crc32_le(0, (const uint8_t*)gravAmostras, gravQtd * sizeof(AmostraLuta));
+    c.crcDados = esp_rom_crc32_le(c.crcDados, (const uint8_t*)gravEventos, gravEventosQtd * sizeof(EventoLuta));
+    c.crcCabecalho = crcCabecalho(c);
+}
+
+// Chamada pela stopRobot depois do freio e dos LEDs. Os motores ja estao travados
+void guardarRound() {
+    // A analogSensorTask fecha o gravador (evParada) no ciclo seguinte ao IR 3
+    for (int i = 0; gravAtivo && i < ROUND_ESPERA_MS; i++) vTaskDelay(pdMS_TO_TICKS(1));
+
+    const esp_partition_t* p = particaoRounds();
+    if (!gravTerminou || gravAtivo || gravQtd == 0 || !roundsMutex) {
+        roundProcessado = true;               // Sem luta gravada (IR 3 fora da luta)
+        return;
+    }
+    if (!p) {
+        logBT("Sem particao para guardar a luta: so a exportacao da RAM ('d') antes de reiniciar\n");
+        roundProcessado = true;
+        return;
+    }
+
+    xSemaphoreTake(roundsMutex, portMAX_DELAY);
+    CabecalhoRound cab[ROUNDS_SLOTS];
+    uint8_t validos = lerCabecalhos(p, cab);
+    int slot = -1, maisAntigo = -1;
+    uint16_t ultimo = 0;
+    for (int s = 0; s < ROUNDS_SLOTS; s++) {
+        if (!(validos & (1 << s))) {
+            if (slot < 0) slot = s;
+            continue;
+        }
+        if (cab[s].round > ultimo) ultimo = cab[s].round;
+        if (maisAntigo < 0 || cab[s].round < cab[maisAntigo].round) maisAntigo = s;
+    }
+    uint16_t sobrescrito = 0;
+    if (slot < 0) {                           // Todos ocupados: o round novo ocupa o lugar do mais antigo
+        slot = maisAntigo;
+        sobrescrito = cab[slot].round;
+    }
+
+    CabecalhoRound novo;
+    preencherCabecalho(novo, ultimo + 1);
+    uint32_t base = slot * ROUND_SLOT_BYTES;
+
+    // Em pedacos, com pausas: o nucleo 0 nao fica preso (watchdog) e o freio segue reforcado
+    bool ok = true;
+    for (uint32_t s = 0; ok && s < ROUND_SLOT_BYTES; s += SETOR_FLASH) {
+        ok = esp_partition_erase_range(p, base + s, SETOR_FLASH) == ESP_OK;
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    const uint8_t* amostras = (const uint8_t*)gravAmostras;
+    uint32_t total = gravQtd * sizeof(AmostraLuta);
+    for (uint32_t i = 0; ok && i < total; i += SETOR_FLASH) {
+        ok = esp_partition_write(p, base + ROUND_DADOS_OFFSET + i, amostras + i, min((uint32_t)SETOR_FLASH, total - i)) == ESP_OK;
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    if (ok) ok = esp_partition_write(p, base + ROUND_EVENTOS_OFFSET, gravEventos, gravEventosQtd * sizeof(EventoLuta)) == ESP_OK;
+    if (ok) ok = esp_partition_write(p, base, &novo, sizeof(novo)) == ESP_OK;   // Por ultimo: valida o slot
+
+    int guardados = 0;
+    if (ok) {
+        validos = lerCabecalhos(p, cab);      // Confere o que ficou na flash
+        ok = (validos & (1 << slot)) && cab[slot].round == novo.round;
+        for (int s = 0; s < ROUNDS_SLOTS; s++) guardados += (validos >> s) & 1;
+    }
+    roundGuardado = ok;
+    xSemaphoreGive(roundsMutex);
+
+    if (ok) {
+        logBT("//=====//Luta guardada como ROUND %u (%d de %d slots ocupados)//=====//\n",
+              novo.round, guardados, ROUNDS_SLOTS);
+        if (sobrescrito) logBT("Slots cheios: o round %u (o mais antigo) foi sobrescrito\n", sobrescrito);
+        logBT("Envie 'd' (Serial ou BT) para exportar todos os rounds e 'l' para limpar os exportados\n");
+    } else {
+        logBT("Falha ao guardar a luta na flash: so a exportacao da RAM ('d') antes de reiniciar\n");
+    }
+    roundProcessado = true;
+}
+
+// Le um bloco da luta: da flash (slot >= 0) ou da RAM (slot < 0)
+void lerTrechoRound(int slot, uint32_t offset, void* destino, const void* ram, uint32_t tamanho) {
+    const esp_partition_t* p = particaoRounds();
+    if (slot >= 0 && p) esp_partition_read(p, slot * ROUND_SLOT_BYTES + offset, destino, tamanho);
+    else memcpy(destino, ram, tamanho);
+}
+
+void exportarLuta(Print& saida, const CabecalhoRound& c, int slot, bool pausar) {
+    static AmostraLuta amostras[ROUND_BLOCO];   // Static: a exportacao roda sob o roundsMutex
+    static EventoLuta eventos[ROUND_BLOCO];
+
+    saida.println("#LUTA_INICIO");
+    if (c.round) saida.printf("#round,%u\n", c.round);
+    else saida.println("#round,ram");
+    saida.printf("#adversario,%s\n", nomeAdversarioDe((TipoAdversario)c.adversario));
+    saida.printf("#asa,%s\n", c.asa ? "aberta" : "fechada");
+    saida.printf("#iniciacao,%s\n", c.iniciacao);
+    saida.printf("#direcao,%s\n", c.direcao == direita ? "direita" : "esquerda");
+    saida.printf("#movimentacao,%s\n", nomeModoCsv(c.movimentacao));
+    saida.printf("#furtivo,%d\n", (int)c.furtivo);
+    saida.printf("#finalizacao,%s\n", c.finalizacao == FIM_TEMPO ? "tempo" : "ldr");
+    saida.printf("#tempoFinalizacaoMs,%lu\n", (unsigned long)c.tempoFinalizacaoMs);
+    saida.printf("#limiarLinha,%ld\n#quedaLinha,%ld\n#limiarLdr,%ld\n", (long)c.limiarLinha, (long)c.quedaLinha, (long)c.limiarLdr);
+    saida.printf("#periodoSensoresUs,%ld\n#janelaMs,%ld\n", (long)c.periodoUs, (long)c.janelaMs);
+
+    saida.printf("#AMOSTRAS,%u\n", c.amostras);
+    saida.println("t_ms,linhaE,linhaD,ldr,jsE,irE,irD,jsD,viuLinhaE,viuLinhaD,viuLdr,pwmE,pwmD,modo,flanco,cargaTotal,ldrAtacando");
+    for (int inicio = 0; inicio < c.amostras; inicio += ROUND_BLOCO) {
+        int n = min(ROUND_BLOCO, c.amostras - inicio);
+        lerTrechoRound(slot, ROUND_DADOS_OFFSET + inicio * sizeof(AmostraLuta), amostras,
+                       &gravAmostras[inicio], n * sizeof(AmostraLuta));
+        for (int k = 0; k < n; k++) {
+            const AmostraLuta& a = amostras[k];
+            uint8_t s = a.sensores;
+            saida.printf("%d,%u,%u,%u,%d,%d,%d,%d,%d,%d,%d,%d,%d,%s,%s,%d,%d\n",
+                         (inicio + k + 1) * (int)c.janelaMs, a.linhaE, a.linhaD, a.ldr,
+                         (s & SENS_JS_E) != 0, (s & SENS_IR_E) != 0, (s & SENS_IR_D) != 0, (s & SENS_JS_D) != 0,
+                         (s & SENS_LINHA_E) != 0, (s & SENS_LINHA_D) != 0, (s & SENS_LDR) != 0,
+                         a.pwmE, a.pwmD, nomeModoCsv(a.estado & 0x07), nomeFlancoCsv((a.estado >> 3) & 0x07),
+                         (a.estado >> 6) & 1, (a.estado >> 7) & 1);
+        }
+        if (pausar) vTaskDelay(pdMS_TO_TICKS(20));   // Nao estoura o buffer do BT
+    }
+
+    saida.printf("#EVENTOS,%u\n", c.eventos);
+    saida.println("t_ms,evento,valor");
+    for (int inicio = 0; inicio < c.eventos; inicio += ROUND_BLOCO) {
+        int n = min(ROUND_BLOCO, c.eventos - inicio);
+        lerTrechoRound(slot, ROUND_EVENTOS_OFFSET + inicio * sizeof(EventoLuta), eventos,
+                       &gravEventos[inicio], n * sizeof(EventoLuta));
+        for (int k = 0; k < n; k++) {
+            const EventoLuta& e = eventos[k];
+            if (e.tipo == evModo)        saida.printf("%u,modo,%s\n", e.tMs, nomeModoCsv(e.valor));
+            else if (e.tipo == evFlanco) saida.printf("%u,flanco,%s\n", e.tMs, nomeFlancoCsv(e.valor));
+            else                         saida.printf("%u,%s,%d\n", e.tMs, nomeEventoCsv(e.tipo), e.valor);
+        }
+        if (pausar) vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    saida.println("#LUTA_FIM");
+}
+
+// Flash e exportacao so com o robo fora de combate: nem lutando, nem esperando a largada
+bool flashLiberada(Print& saida) {
+    if (running || gravAtivo || (largadaLiberada && !roboParado)) {
+        saida.println("Indisponivel com o robo pronto para lutar: envie o IR 3 antes");
+        return false;
+    }
+    if (roboParado && !roundProcessado) {
+        saida.println("Guardando a luta, envie de novo em instantes");
+        return false;
+    }
+    return true;
+}
+
+// 'd': todos os rounds da flash, do mais antigo ao mais novo, e a luta da RAM se nao foi guardada
+void exportarRounds(Print& saida, bool pausar) {
+    if (!flashLiberada(saida) || !roundsMutex) return;
+    xSemaphoreTake(roundsMutex, portMAX_DELAY);
+    const esp_partition_t* p = particaoRounds();
+    CabecalhoRound cab[ROUNDS_SLOTS];
+    int ordem[ROUNDS_SLOTS];
+    int n = p ? ordenarRounds(cab, lerCabecalhos(p, cab), ordem) : 0;
+    bool ram = gravTerminou && !roundGuardado && gravQtd > 0;
+
+    if (n == 0 && !ram) {
+        saida.println("Nenhum round guardado");
+        xSemaphoreGive(roundsMutex);
+        return;
+    }
+
+    saida.printf("#ROUNDS,%d\n", n + ram);
+    exportadosMask = 0;
+    for (int i = 0; i < n; i++) {
+        int s = ordem[i];
+        exportarLuta(saida, cab[s], s, pausar);
+        exportadosMask |= 1 << s;
+        exportadosRound[s] = cab[s].round;
+    }
+    if (ram) {
+        CabecalhoRound atual;
+        preencherCabecalho(atual, 0);         // Round 0 = so na RAM
+        exportarLuta(saida, atual, -1, pausar);
+    }
+    saida.printf("#ROUNDS_FIM,%d\n", n + ram);
+    xSemaphoreGive(roundsMutex);
+}
+
+// 'l': apaga so os slots da ultima exportacao. Um round guardado depois dela continua la
+void limparRounds(Print& saida) {
+    if (!flashLiberada(saida) || !roundsMutex) return;
+    const esp_partition_t* p = particaoRounds();
+    if (!p || !exportadosMask) {
+        saida.println("#LIMPOS,0");
+        saida.println("Nada para limpar: envie 'd' antes (so os rounds exportados sao apagados)");
+        return;
+    }
+    xSemaphoreTake(roundsMutex, portMAX_DELAY);
+    CabecalhoRound cab[ROUNDS_SLOTS];
+    uint8_t validos = lerCabecalhos(p, cab);
+    int limpos = 0;
+    for (int s = 0; s < ROUNDS_SLOTS; s++) {
+        if (!(exportadosMask & (1 << s)) || !(validos & (1 << s)) || cab[s].round != exportadosRound[s]) continue;
+        if (esp_partition_erase_range(p, s * ROUND_SLOT_BYTES, SETOR_FLASH) == ESP_OK) limpos++;   // Sem cabecalho = vazio
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    exportadosMask = 0;
+    xSemaphoreGive(roundsMutex);
+    saida.printf("#LIMPOS,%d\n", limpos);
+    saida.printf("%d round(s) apagado(s). A proxima luta volta a ser o round 1 se nao sobrou nenhum\n", limpos);
+}
+
+// No inicio do AUTO: qual numero a proxima luta vai receber, para anotar quem e o adversario
+void avisarRounds() {
+    const esp_partition_t* p = particaoRounds();
+    if (!p || !roundsMutex) return;
+    xSemaphoreTake(roundsMutex, portMAX_DELAY);
+    CabecalhoRound cab[ROUNDS_SLOTS];
+    int ordem[ROUNDS_SLOTS];
+    int n = ordenarRounds(cab, lerCabecalhos(p, cab), ordem);
+    xSemaphoreGive(roundsMutex);
+
+    uint16_t proximo = n ? cab[ordem[n - 1]].round + 1 : 1;
+    logBT("Rounds guardados: %d de %d. Esta luta sera o ROUND %u", n, ROUNDS_SLOTS, proximo);
+    if (n == ROUNDS_SLOTS) logBT(" (sobrescreve o round %u, exporte antes)", cab[ordem[0]].round);
+    logBT("\n");
+}
+
+// Tabela de configuracao para a ferramenta do PC. O padrao e o valor do codigo capturado no boot,
+// e nvs indica se o item veio da NVS
+void imprimirConfig(Print& saida) {
+    saida.println("#CONFIG_INICIO");
+    saida.println("id,nome,chave,valor,padrao,nvs,minimo,maximo");
+    for (int i = 0; i < NUM_PIN_CONFIG; i++) {
+        saida.printf("%d,%s,%s,%d,%d,%d,,\n", i, PIN_CONFIG[i].nome, PIN_CONFIG[i].nvsKey,
+                     *PIN_CONFIG[i].pino, padraoPinos[i], (int)nvsPinos[i]);
+    }
+    for (int i = 0; i < NUM_THRESHOLD_CONFIG; i++) {
+        const ThresholdConfigEntry& item = THRESHOLD_CONFIG[i];
+        saida.printf("%d,%s,%s,%d,%d,%d,%d,%d\n", NUM_PIN_CONFIG + i, item.nome, item.nvsKey,
+                     *item.valor, padraoValores[i], (int)nvsValores[i], item.minimo, item.maximo);
+    }
+    saida.println("#CONFIG_FIM");
+}
+
+// Comandos do Serial (USB) em qualquer modo. Nucleo 0 e prioridade 1: nunca disputa com o combate,
+// e durante a luta so responde que esta ocupada
+void serialComandosTask(void *pvParameters) {
+    for (;;) {
+        bool pedidoConfig = false, pedidoLuta = false, pedidoLimpar = false;
+        while (Serial.available()) {
+            int c = tolower(Serial.read());
+            if (c == 'c') pedidoConfig = true;
+            if (c == 'd') pedidoLuta = true;
+            if (c == 'l') pedidoLimpar = true;
+        }
+        if ((pedidoConfig || pedidoLuta || pedidoLimpar) && running) {
+            Serial.println("Comando indisponivel durante a luta");
+        } else {
+            if (pedidoConfig) imprimirConfig(Serial);
+            if (pedidoLuta) exportarRounds(Serial, false);
+            if (pedidoLimpar) limparRounds(Serial);
+        }
+        vTaskDelay(pdMS_TO_TICKS(SERIAL_COMANDOS_MS));
+    }
+}
+
+void setupSerialComandos() {
+    roundsMutex = xSemaphoreCreateMutex();
+    xTaskCreatePinnedToCore(serialComandosTask, "SerialComandos", 256 * 16, nullptr, 1, NULL, PRO_CPU_NUM);
+}
+
+// Fim do modoAUTO na luta: depois do IR 3, exporta ('d') e limpa ('l') os rounds quando pedido pelo
+// BT (o Serial e atendido pela serialComandosTask). Nunca move os motores
+void aguardarExportacaoLuta() {
+    for (;;) {
+        if (pollLinhaBT()) {
+            if (ehComando(linhaBT, 'd')) exportarRounds(SerialBT, true);
+            else if (ehComando(linhaBT, 'l')) limparRounds(SerialBT);
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
+#pragma endregion
+
+//===============================================================================================//
 //===================================//ESCOLHA DA ESTRATEGIA//===================================//
 //===============================================================================================//
 
@@ -993,6 +1561,7 @@ void modoAUTO() {
     Serial.println("Cliente Bluetooth conectado! Iniciando comunicacao");
     SerialBT.println("//=====//Bluetooth conectado!//=====//");
     avisarSeTravado();                        // IR 3 recebido antes da selecao (ex.: no IDLE)
+    avisarRounds();                           // Numero que esta luta vai receber
 
     currentStage = STAGE_MODE;
     printLogSelecao();
@@ -1014,6 +1583,8 @@ void modoAUTO() {
         configurarPinos();
     } else if (modoBT == MODO_MACROS) {
         verMacros();
+    } else if (modoBT == MODO_LOG_SENSORES) {
+        executarLogSensores();
     }
 
     vTaskDelay(pdMS_TO_TICKS(500));
@@ -1022,6 +1593,8 @@ void modoAUTO() {
     descartarComandosIR();                    // Descarta IR recebido durante a selecao
     avisarSeTravado();
     largadaLiberada = true;                   // A irMonitorTask passa a repassar os comandos IR
+
+    if (modoBT == MODO_LUTA || modoRapido()) aguardarExportacaoLuta();   // Nao volta
 }
 
 #pragma endregion

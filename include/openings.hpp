@@ -450,8 +450,17 @@ void executarOpening(const OpeningStep strategySequence[]) {
 
 // Teste de sensor: imprime a cada 200ms a tabela de leitura de todos os sensores do Fuego
 // e espelha nos LEDs enderecaveis (JS_E, IR_E, LDR, IR_D, JS_D)
+// Formata um limiar sugerido (-1 = sem contraste suficiente)
+void formatarSugestao(char* destino, size_t tamanho, int limiar) {
+    if (limiar < 0) snprintf(destino, tamanho, "sem contraste");
+    else snprintf(destino, tamanho, "%d", limiar);
+}
+
 void testSensors() {
-    char tabela[512];
+    char tabela[1024];
+    char sugestaoLinha[16];
+    char sugestaoLdr[16];
+    iniciarExtremos();                        // Calibracao: menor e maior valor desde o inicio do teste
     for(;;) {
         indicarSensores(value_JS_E, value_IR_E, value_LDR, value_IR_D, value_JS_D);
 
@@ -468,10 +477,24 @@ void testSensors() {
             LINHA_DIR_PIN, (int)value_QRE_D, (int)adc_QRE_D, LINHA_TRESHOLD);
         pos += snprintf(tabela + pos, sizeof(tabela) - pos, " %2d  | LINHA_ESQ_PIN | %d (ADC %d / limiar %d)\n",
             LINHA_ESQ_PIN, (int)value_QRE_E, (int)adc_QRE_E, LINHA_TRESHOLD);
-        snprintf(tabela + pos, sizeof(tabela) - pos, " %2d  | LDR_PIN       | %d (ADC %d / limiar %d)\n"
-            "Ciclo ADC max: %lu us (limite %d)\n"
-            "||============================||", LDR_PIN, (int)value_LDR, (int)adc_LDR, LDR_TRESHOLD,
+        pos += snprintf(tabela + pos, sizeof(tabela) - pos, " %2d  | LDR_PIN       | %d (ADC %d / limiar %d)\n"
+            "Ciclo ADC max: %lu us (limite %d)\n", LDR_PIN, (int)value_LDR, (int)adc_LDR, LDR_TRESHOLD,
             (unsigned long)adcCicloMaxUs, ADC_CICLO_LIMITE_US);
+
+        // Calibracao: o branco e o menor valor visto e o preto o maior; no LDR, escuro e claro
+        formatarSugestao(sugestaoLinha, sizeof(sugestaoLinha),
+            sugerirLimiarLinha(extMinLinhaE, extMaxLinhaE, extMinLinhaD, extMaxLinhaD));
+        formatarSugestao(sugestaoLdr, sizeof(sugestaoLdr), sugerirLimiarLdr(extMinLdr, extMaxLdr));
+        snprintf(tabela + pos, sizeof(tabela) - pos,
+            "Ref. do preto: E %d | D %d (queda %d)\n"
+            "Calibracao (passe as linhas no preto e no branco, cubra o LDR):\n"
+            "  Linha E: branco %d / preto %d | Linha D: branco %d / preto %d\n"
+            "  LDR: escuro %d / claro %d\n"
+            "  Sugestao: linha %s | LDR %s\n"
+            "||============================||",
+            (int)baseLinhaE, (int)baseLinhaD, LINHA_QUEDA,
+            (int)extMinLinhaE, (int)extMaxLinhaE, (int)extMinLinhaD, (int)extMaxLinhaD,
+            (int)extMinLdr, (int)extMaxLdr, sugestaoLinha, sugestaoLdr);
 
         Serial.println(tabela);
         SerialBT.println(tabela);
@@ -587,6 +610,7 @@ void openingsTask(void *pvParameters) {
         openingsLutaBT();                   // Executa a iniciacao selecionada nas etapas BT
         if (roboParado) continue;           // IR 3 durante a iniciacao: a luta nunca comeca
         tempoFighting = millis();
+        iniciarGravador();                    // Grava a luta a partir daqui (nao a iniciacao)
         running = true;                       // Ativa o robo
     }
 }

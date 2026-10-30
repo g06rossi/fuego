@@ -1,0 +1,11 @@
+libusb-win32 (libusb0.dll), version 1.2.6.0
+Copyright (c) 2002-2012 Stephan Meyer, Travis Lee Robinson and the libusb-win32 contributors
+
+The library (libusb0.dll) is distributed under the terms of the GNU Lesser General Public
+License, version 2.1 or later (LGPL-2.1). The full license text is available at
+https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html
+
+Source code: https://github.com/mcuee/libusb-win32 (tag 1.2.6.0)
+
+The files in x64/ and x86/ are unmodified binaries of the release that the SixaxisPairTool
+installs together with the libusb0.sys driver. The FST only loads them at runtime (ctypes).

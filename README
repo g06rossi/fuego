@@ -69,6 +69,19 @@ include
 |_ boot_mode.hpp      -> NVS do modo de boot, pinos e limiares; senha de boot por IR
 |_ rc_mode.hpp        -> Interpretacao do controle de PS4 no modo RC
 
+tools
+|_ fst.bat            -> Abre o Fuego Sumo Tool (FST)
+|_ fst.py             -> Interface do FST: coleta, firmware, dados, NVS e guia
+|_ coletar_luta.py    -> Coleta os rounds guardados (USB ou texto do BT), salva em CSV e limpa o robo
+|_ firmware.py        -> Compila, grava e limpa a flash pelo PlatformIO; commit e push pelo git
+|_ ps4_mac.py         -> Le e grava o MAC mestre do controle PS4 pela USB (como o SixaxisPairTool)
+|_ gerar_imagens.py   -> Gera a foto e a foto tratada do robo usadas pela interface
+|_ imagens/           -> ASCII art do robo (fuego.txt), foto original e as versoes geradas
+|_ config_nvs.py      -> Le a configuracao (NVS) do robo e aplica os valores no codigo
+|_ exemplos/          -> Exportacoes simuladas de luta para testar a ferramenta
+|_ lib/               -> Bibliotecas de terceiros do FST (pyserial e libusb0.dll), com as licencas
+|_ README.md          -> Passo a passo e funcionalidades do FST
+
 CLAUDE.md             -> Guia completo do firmware para agentes de IA
 
 Achou o repositório, né? Que bom ver vocês aqui!

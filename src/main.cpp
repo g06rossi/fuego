@@ -118,6 +118,7 @@ void setup() {
     // Tasks de sensor: a irMonitorTask inicia o receptor IR e a analogSensorTask liga o timer, as
     // duas no nucleo 0, para as ISRs nao interromperem o combate no nucleo 1
     setupSensorTask();                        // Configura as tarefas de sensoreamento
+    setupSerialComandos();                    // Comandos do Serial ('c' configuracao, 'd' luta)
     printActiveIRProtocols(&Serial);
     Serial.println("//=====//Setup sensores e IR feita//=====//");
     vTaskDelay(pdMS_TO_TICKS(100));           // Pequeno atraso para protecao

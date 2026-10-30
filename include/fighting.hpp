@@ -19,7 +19,12 @@ void modoDesengate();
 // Velocidades em PWM (0-255) e tempos em ms
 
 // Sensor de linha
-int LINHA_TRESHOLD                        = 3800;  // ADC abaixo disso = linha branca (configuravel via NVS)
+int LINHA_TRESHOLD                        = 2062;  // ADC abaixo disso = linha branca (configuravel via NVS)
+// Queda relativa: tambem e linha quando o ADC cai LINHA_QUEDA abaixo da referencia do preto (media
+// lenta do proprio sensor). Pega a passada rapida em que o sinal cai mas nao chega ao limiar
+int LINHA_QUEDA                           = 300;   // 0 desliga a queda relativa (configuravel via NVS)
+const int LINHA_HISTERESE                 = 100;   // Sai da linha so LINHA_HISTERESE acima da entrada
+const int LINHA_BASE_SHIFT                = 8;     // Referencia do preto: media de ~2^8 amostras (~77 ms)
 
 // Leitura do adversario (giros iguais em todas as buscas)
 const int velGiroRoda                     = 255;   // Roda externa no giro em torno da roda (interna parada)
@@ -34,7 +39,7 @@ const int velDefensivaFrente              = 70;    // Adversario a frente
 const unsigned long defensivaEscalaMs     = 10000; // Sem tocar a linha -> vira Busca Linha de vez
 
 // Busca Linha
-int velBuscaLinhaCruzeiro                 = 60;   // Avanco normal (configuravel via NVS)
+int velBuscaLinhaCruzeiro                 = 120;  // Avanco normal (configuravel via NVS)
 const int velBuscaLinhaArrancada          = 255;   // Arrancada de desencalhe
 const unsigned long arrancadaIntervaloMs  = 4000;  // Sem linha -> dispara arrancada
 const unsigned long arrancadaDuracaoMs    = 90;
@@ -51,9 +56,9 @@ const unsigned long pulsoQuantidade       = 6;
 const int velRetornoRecuo                 = 255;
 const int velRetornoGiro                  = 255;
 int retornoRecuoLateralMs                 = 160;   // Linha vista por 1 sensor (configuravel via NVS)
-int retornoGiroLateralMs                  = 95;   // (configuravel via NVS)
-int retornoRecuoFrontalMs                 = 200;   // Linha vista pelos 2 sensores (configuravel via NVS)
-int retornoGiroFrontalMs                  = 100;   // (configuravel via NVS)
+int retornoGiroLateralMs                  = 110;  // (configuravel via NVS)
+int retornoRecuoFrontalMs                 = 250;   // Linha vista pelos 2 sensores (configuravel via NVS)
+int retornoGiroFrontalMs                  = 120;   // (configuravel via NVS)
 
 // Desengate (LDR apagou apos ataque): varredura em S
 const int velDesengateInterna             = 140;   // Roda interna da curva

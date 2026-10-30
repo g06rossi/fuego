@@ -17,6 +17,8 @@
 #include "soc/gpio_struct.h"                   // DOIS | Acesso direto e rapido aos pinos GPIO
 #include "driver/ledc.h"                       // DOIS | Controle do periferico de PWM por hardware
 #include "driver/adc.h"                        // DOIS | Leitura direta do ADC1 (linha e LDR)
+#include "esp_partition.h"                     // DOIS | Particao spiffs onde os rounds ficam guardados
+#include "esp_rom_crc.h"                       // DOIS | CRC dos rounds guardados
 
 #pragma endregion
 
@@ -215,9 +217,9 @@ uint8_t LINHA_ESQ_PIN          = 34;          //  AUTO | Sensor Linha esquerdo
 // LINHA_TRESHOLD fica nos parametros de ajuste do fighting.hpp
 
 uint8_t LDR_PIN                = 36;          //  AUTO | Sensor LDR
-int LDR_TRESHOLD               = 400;         //  AUTO | ADC filtrado abaixo disso = adversario na rampa
+int LDR_TRESHOLD               = 474;         //  AUTO | ADC filtrado abaixo disso = adversario na rampa
 
-int PERIODO_SENSORES_US        = 300;         //  DOIS | Periodo do timer de leitura dos sensores (us, NVS)
+int PERIODO_SENSORES_US        = 100;         //  DOIS | Periodo do timer de leitura dos sensores (us, NVS)
 
 #pragma endregion
 
@@ -308,7 +310,8 @@ enum ModoBT {                                 //  AUTO | Opcoes da etapa de modo
    MODO_CONFIGURACAO,
    MODO_MACROS,
    MODO_RAPIDA_JSUMO_LIGADO,                  // Luta com presets: so pergunta iniciacao e direcao
-   MODO_RAPIDA_JSUMO_DESLIGADO                // Idem, com furtivo na movimentacao
+   MODO_RAPIDA_JSUMO_DESLIGADO,               // Idem, com furtivo na movimentacao
+   MODO_LOG_SENSORES                          // Busca Linha gravando linha e LDR, sugere limiares
 };
 
 enum FinalizationMode {                       //  AUTO | Finalizacao da estrategia
@@ -411,6 +414,7 @@ struct ThresholdConfigEntry {
 
 // Definidos junto do codigo que os usa (fighting.hpp e rc_mode.hpp)
 extern int LINHA_TRESHOLD;
+extern int LINHA_QUEDA;
 extern int velBuscaLinhaCruzeiro;
 extern int retornoRecuoLateralMs;
 extern int retornoGiroLateralMs;
@@ -434,6 +438,7 @@ const ThresholdConfigEntry THRESHOLD_CONFIG[] = {
    {"Coef. Re RC Dir (%)",   &coefReversoDir,        "t_cd",    0,   100},
    // Abaixo de 100 us o timer dispara rapido demais para a ISR e as tasks dos sensores
    {"Periodo Sensores (us)", &PERIODO_SENSORES_US,   "t_ps",  100, 10000},
+   {"Queda Linha (ADC)",     &LINHA_QUEDA,           "t_lq",    0,  4095},
 };
 const int NUM_THRESHOLD_CONFIG = sizeof(THRESHOLD_CONFIG) / sizeof(THRESHOLD_CONFIG[0]);
 

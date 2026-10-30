@@ -61,6 +61,9 @@ void salvarBootMode(BootMode modo) {
 // Padroes de cada item configuravel: o valor com que a variavel foi inicializada no codigo
 uint8_t padraoPinos[NUM_PIN_CONFIG];
 int padraoValores[NUM_THRESHOLD_CONFIG];
+// Itens que vieram da NVS no boot (para a ferramenta do PC mostrar sem abrir a NVS de outra task)
+bool nvsPinos[NUM_PIN_CONFIG];
+bool nvsValores[NUM_THRESHOLD_CONFIG];
 
 void carregarPinConfig() {
     // Captura os padroes antes de a NVS sobrescrever as variaveis (e antes do begin, que falha
@@ -71,10 +74,12 @@ void carregarPinConfig() {
     if (!preferences.begin(NVS_NAMESPACE, true)) return;
     for (int i = 0; i < NUM_PIN_CONFIG; i++) {
         uint8_t val = preferences.getUChar(PIN_CONFIG[i].nvsKey, 0xFF);
+        nvsPinos[i] = (val != 0xFF);
         if (val != 0xFF) *PIN_CONFIG[i].pino = val;
     }
     for (int i = 0; i < NUM_THRESHOLD_CONFIG; i++) {
         int val = preferences.getInt(THRESHOLD_CONFIG[i].nvsKey, -1);
+        nvsValores[i] = (val >= 0);
         if (val >= 0) *THRESHOLD_CONFIG[i].valor = val;
     }
     preferences.end();

@@ -43,7 +43,11 @@ pio run --target erase         # apaga a flash (apaga a NVS também!)
 - **JSumo E/D** (`JS_E`, `JS_D`): ficam nas **laterais**, perpendiculares à frente. Emitem e recebem. O GND deles passa por um transistor NMOS (`NMOS_PIN`). Desligar o NMOS deixa os JSumos "cegos". Esse é o **modo furtivo**.
 - **IR E/D** (`IR_E`, `IR_D`): ficam na **frente**, cada um angulado ~15° para fora. **Só recebem**, ou seja, detectam a emissão IR do adversário. Um adversário sem emissor pode passar despercebido por eles. São **ativos em LOW** (0 no pino = viu): a ISR inverte a leitura (`value_IR_* = !lerGPIO(...)`), então no resto do código `value_IR_* == 1` significa "viu". Os JSumos são ativos em HIGH e não são invertidos.
 - **Ponto cego:** entre o cone dos IRs (±15°) e os JSumos (90°) há uma faixa que nenhum sensor cobre. Um giro que começa num sensor precisa continuar até chegar no outro.
-- **Linha E/D** (QRE, `value_QRE_E/D`): detectam a borda branca do dohyo. São **analógicos**: ADC abaixo de `LINHA_TRESHOLD` (3800, definido nos parâmetros do `fighting.hpp` e configurável por NVS) = linha branca.
+- **Linha E/D** (QRE, `value_QRE_E/D`): detectam a borda branca do dohyo. São **analógicos**. Cada sensor tem um `DetectorLinha` (`atualizarLinha()` em `sensor_task.hpp`) que marca linha em dois casos:
+  - o ADC fica abaixo de `LINHA_TRESHOLD` (3800, NVS); ou
+  - o ADC cai `LINHA_QUEDA` (300, NVS; 0 desliga) abaixo da **referência do preto**, uma média lenta do próprio sensor (~77 ms, `LINHA_BASE_SHIFT`) que só anda fora da linha.
+
+  A queda relativa pega a passada rápida em que o sinal do QRE1113 começa a cair, mas não chega ao limiar. A saída da linha tem histerese (`LINHA_HISTERESE`, 100). Os parâmetros ficam no topo do `fighting.hpp`.
 - **LDR** (`value_LDR`): detecta a sombra do adversário sobre a rampa. É usado na finalização por LDR. É **analógico**, com média móvel de `LDR_JANELA_FILTRO` (8) amostras: abaixo de `LDR_TRESHOLD` (200) = adversário na rampa.
 - JSumos e IRs são lidos como **digitais** pela ISR `readSensors()` a cada `PERIODO_SENSORES_US` (timer de hardware; padrão **300 µs**, configurável por NVS de 100 a 10000 µs), com `lerGPIO()`. Linha e LDR são lidos pela `analogSensorTask`, que a própria ISR acorda por notificação a cada ciclo, porque `analogRead` não pode ser chamado dentro de ISR. Não troque isso por `vTaskDelay`: o menor intervalo dele é 1 ms, um passo do FreeRTOS. A task lê com `adc1_get_raw` (ADC configurado uma vez, `adc_power_acquire`), **nunca com `analogRead`** (veja a seção 11). O Teste de sensor mostra a maior duração de um ciclo (`adcCicloMaxUs`). Se um ciclo passar de `ADC_CICLO_LIMITE_US` (2/3 do período), a task cede 1 ms ao núcleo 0 para proteger o watchdog. Os valores crus ficam em `adc_QRE_E/D` e `adc_LDR`, e o Teste de sensor mostra esses valores para calibrar os limiares.
 - O sentido das comparações (abaixo do limiar = detectou) segue o legado sumo-sdk (`profiles/fuego.hpp`). Confirme no Teste de sensor depois de qualquer troca de hardware.
@@ -75,7 +79,7 @@ Os pinos de motores, servo, NMOS e sensores são **variáveis `uint8_t`** em `de
 
 | Arquivo | Conteúdo |
 |---|---|
-| `src/main.cpp` | `setup()` (carrega a NVS, configura pinos, LEDs, IR, tasks), `__init__()` (escolhe o modo no IDLE) e `loop()` (chama `modoAUTO()` ou `modoRC()`, depois se suspende) |
+| `src/main.cpp` | `setup()` (carrega a NVS, configura pinos, LEDs, IR, tasks), `__init__()` (escolhe o modo no IDLE) e `loop()` (chama `modoAUTO()` ou `modoRC()`, depois se suspende; na luta, o `modoAUTO` fica na exportação e não volta) |
 | `include/defines.hpp` | Bibliotecas, objetos globais, handles, pinos, variáveis de sensor, **todos os enums/structs** e as tabelas `PIN_CONFIG`/`THRESHOLD_CONFIG` |
 | `include/functions.hpp` | `delayUs`, `lerGPIO`, `directWrite*`, `definirJSumos`, todas as funções de LED e o callback do BT |
 | `include/move.hpp` | Motores (`moverMotores`, `brakeMotors`, `stopMotors`), servo e configuração do LEDC |
@@ -94,10 +98,11 @@ A pasta `scratch/` é rascunho. Ao criar ou renomear arquivos, atualize a lista 
 
 | Task | Núcleo | Prio. | Função |
 |---|---|---|---|
-| `stopRobot` | 0 | 17 | No IR 3: `travarMotores()`, depois LEDs vermelhos e "PAROU"; reforça o freio a cada 1 s para sempre |
+| `stopRobot` | 0 | 17 | No IR 3: `travarMotores()`, depois LEDs vermelhos, "PAROU" e `guardarRound()` (luta para a flash); reforça o freio a cada 1 s para sempre |
 | `analogSensorTask` | 0 | 16 | Liga o timer dos sensores ao iniciar (a ISR fica no núcleo 0). Acordada pela ISR a cada `PERIODO_SENSORES_US`: lê linha e LDR (ADC), aplica limiares e filtro e, durante a luta, acorda a `fightingLogicTask`. Acima do IR porque a linha é a leitura mais crítica |
 | `irMonitorTask` | 0 | 15 | Inicia o receptor IR (`IrReceiver.begin`, para a ISR de 50 µs do IRremote ficar no núcleo 0). Decodifica o IR a cada `IR_LEITURA_MS` (20 ms). IR 3 → notifica a `stopRobot` na hora. Os outros comandos vão para a fila `irQueue`, e, com `largadaLiberada`, ela notifica a `handleIRCommand` |
 | `openServo` / `closeServo` | 0 | 15 | Movem o servo |
+| `serialComandos` | 0 | 1 | Lê os comandos do Serial a cada 50 ms: `c` (configuração) e `d` (luta). Não responde durante a luta |
 | `handleIRCommand` | 1 | 14 | Acordada pela `irMonitorTask` (só com `largadaLiberada`). IR 1 = pronto, IR 2 = inicia a iniciação e desliga `largadaLiberada`. Nunca é apagada: fica bloqueada, porque a `irMonitorTask` poderia notificar um handle já liberado |
 | `fightingLogicTask` | 1 | 14 | Acordada pela `analogSensorTask` ao fim de cada ciclo, **só com `running`**, e despacha o modo de luta com as leituras do ciclo atual |
 | `openingsTask` | 1 | 14 | Executa a iniciação e depois liga `running` |
@@ -129,7 +134,7 @@ Regiões críticas: `sensorMux` (ISR) e `motorMux` (escrita no LEDC e cache do `
 ### 7.1 Configuração por Bluetooth (nome "Fuego Wu")
 Você envia um índice por mensagem e confirma com ENTER ou esperando 600 ms sem digitar. `?` imprime de novo e `R` reinicia. As etapas são, nesta ordem (enum `ConfigStage`, cuja ordem **tem que** seguir o fluxo, porque o log usa `currentStage > STAGE_X`):
 
-1. **MODO:** 0 Luta, 1 Teste de sensor, 2 Teste de motor, 3 Estratégia personalizada, 4 Configuração (pinos e parâmetros), 5 Macros, 6 Rápida JSumo Ligado, 7 Rápida JSumo Desligado. Testes, Personalizada, Configuração e Macros terminam a seleção aqui e abrem um menu próprio. As **rápidas** aplicam um preset (`aplicarPresetRapido()`: Rampa Simples com IR, asa aberta, Busca Defensiva, finalização por LDR, furtivo da movimentação desativado no 6 e ativado no 7) e só perguntam INICIAÇÃO e DIREÇÃO. Depois da DIREÇÃO, a seleção termina e a luta segue igual à do modo 0.
+1. **MODO:** 0 Luta, 1 Teste de sensor, 2 Teste de motor, 3 Estratégia personalizada, 4 Configuração (pinos e parâmetros), 5 Macros, 6 Rápida JSumo Ligado, 7 Rápida JSumo Desligado, 8 Log de sensores. Testes, Personalizada, Configuração, Macros e Log terminam a seleção aqui e abrem um menu próprio. As **rápidas** aplicam um preset (`aplicarPresetRapido()`: Rampa Simples com IR, asa aberta, Busca Defensiva, finalização por LDR, furtivo da movimentação desativado no 6 e ativado no 7) e só perguntam INICIAÇÃO e DIREÇÃO. Depois da DIREÇÃO, a seleção termina e a luta segue igual à do modo 0.
 2. **ADVERSÁRIO:** 0 Rampa Simples com IR, 1 Rampa Simples sem IR, 2 Asa Sem Emissor, 3 Asa Com Emissor (`tipoAdversario`).
 3. **ASA:** 0 Fechada, 1 Aberta (`abrirAsa`). Se Aberta, abre no início da iniciação.
 4. **INICIAÇÃO:** 0 nenhuma (iterativo puro) ou 1–N, uma das iniciações de `macros[]`: as 10 padrão e as novas salvas pelo histórico da personalizada.
@@ -139,7 +144,7 @@ Você envia um índice por mensagem e confirma com ENTER ou esperando 600 ms sem
 8. **FINALIZAÇÃO:** 0 LDR, 1 Tempo.
 9. **TEMPO DA FINALIZAÇÃO:** só aparece com Tempo. São os ms até a troca para a Busca Ofensiva (sugerido `FINAL_TEMPO_MS` = 4000).
 
-**Configuração (modo 4):** a tabela mostra ID, componente e valor. Envie o ID e depois o novo valor. `x` salva na NVS e reinicia. A tabela tem os 13 pinos (IDs 0–12), os 2 limiares (13–14), os 2 ângulos do servo (15–16), a antecedência da asa (17), a velocidade de cruzeiro da Busca Linha (18), os tempos do Retorno (19–22: recuo lateral, giro lateral, recuo frontal, giro frontal) os coeficientes de ré do RC em % (23–24) e o período do timer dos sensores em µs (25). Para adicionar um item configurável, basta incluir uma linha em `PIN_CONFIG` ou `THRESHOLD_CONFIG` (`defines.hpp`), com nome, ponteiro para a variável, chave da NVS e, nos valores, o mínimo e o máximo aceitos pelo menu. A tabela **não guarda o padrão**: o padrão é o valor com que a variável é inicializada no código, e ele é lido no boot. O menu e a NVS funcionam sozinhos com a linha nova. Se a variável for definida em outro header, declare-a com `extern` antes da tabela (como `LINHA_TRESHOLD`, `velBuscaLinhaCruzeiro` e `coefReversoEsq/Dir`). A tabela só guarda inteiros, então coeficientes vão em porcentagem.
+**Configuração (modo 4):** a tabela mostra ID, componente e valor. Envie o ID e depois o novo valor. `x` salva na NVS e reinicia. A tabela tem os 13 pinos (IDs 0–12), os 2 limiares (13–14), os 2 ângulos do servo (15–16), a antecedência da asa (17), a velocidade de cruzeiro da Busca Linha (18), os tempos do Retorno (19–22: recuo lateral, giro lateral, recuo frontal, giro frontal) os coeficientes de ré do RC em % (23–24), o período do timer dos sensores em µs (25) e a queda relativa da linha (26). Para adicionar um item configurável, basta incluir uma linha em `PIN_CONFIG` ou `THRESHOLD_CONFIG` (`defines.hpp`), com nome, ponteiro para a variável, chave da NVS e, nos valores, o mínimo e o máximo aceitos pelo menu. A tabela **não guarda o padrão**: o padrão é o valor com que a variável é inicializada no código, e ele é lido no boot. O menu e a NVS funcionam sozinhos com a linha nova. Se a variável for definida em outro header, declare-a com `extern` antes da tabela (como `LINHA_TRESHOLD`, `velBuscaLinhaCruzeiro` e `coefReversoEsq/Dir`). A tabela só guarda inteiros, então coeficientes vão em porcentagem.
 
 **Macros (modo 5):** só visualiza, não altera nada. Lista as iniciações de `macros[]` com os mesmos índices da etapa INICIAÇÃO. O índice **0 imprime todas**. Ao receber um índice, imprime os passos atuais (`Vel E | Vel D | Tempo`) das versões esquerda e direita (uma tabela só quando as duas são iguais). Para a Curva de Borda, que não é matriz, imprime os passos com as constantes `curvaBorda*`. `?` reimprime a lista e `R` reinicia.
 
@@ -149,7 +154,16 @@ Você envia um índice por mensagem e confirma com ENTER ou esperando 600 ms sem
 - **2 - Histórico:** as últimas `HISTORICO_TAMANHO` (5) matrizes enviadas pelos modos 0 e 1, gravadas na NVS (1 = a mais nova). Cada uma pode ser executada de novo (espera o 2, e não entra de novo no histórico), salva numa iniciação existente (lado esquerdo, direito ou os dois com o direito espelhado; nome novo ou `.` para manter) ou salva numa **iniciação nova** (nome obrigatório; o outro lado recebe a matriz espelhada). A Curva de Borda não pode ser substituída.
 - As linhas são lidas por `pollLinhaBT()`/`esperarLinhaBT()`, que fecham a linha no ENTER ou depois de `BT_NUM_TIMEOUT_MS` sem novos caracteres.
 
-**Teste de sensor:** a cada 200 ms imprime uma tabela `Pino | Sensor | Leitura` no BT e no Serial (linha e LDR também mostram o ADC e o limiar), e espelha os sensores nos LEDs.
+**Teste de sensor:** a cada 200 ms imprime uma tabela `Pino | Sensor | Leitura` no BT e no Serial (linha e LDR também mostram o ADC e o limiar), e espelha os sensores nos LEDs. Também mostra:
+- a referência do preto de cada linha;
+- a **calibração**: o menor e o maior ADC de cada sensor desde o início do teste (`iniciarExtremos()`), com o limiar sugerido no meio (`sugerirLimiarLinha`/`sugerirLimiarLdr`; "sem contraste" se a diferença for menor que `CONTRASTE_MINIMO`).
+
+**Log de sensores (modo 8):** `executarLogSensores()`.
+1. Espera o 2 (BT ou IR; `x` reinicia).
+2. Roda a Busca Linha pura por `LOG_DURACAO_MS` (8 s), com Retorno na linha, mas sem ataque por LDR nem troca para a Ofensiva.
+3. A `analogSensorTask` grava em `logSensores[]` o **menor valor** de cada linha e do LDR a cada janela de `LOG_JANELA_MS` (10 ms). São 800 amostras × 6 bytes = 4,8 KB, e nenhuma passada pela linha ou sombra se perde.
+4. No fim, o robô para, grava o log na NVS (namespace `fuego_log`, se houver espaço), imprime as amostras e sugere limiares. Na linha, o preto é a mediana e o branco o mínimo. No LDR, o claro é a mediana e o escuro o mínimo. Para o LDR ter sugestão, é preciso fazer sombra nele durante o teste.
+5. Menu final: 0 usa os sugeridos (salva na NVS e reinicia), 1 reinicia sem salvar, 2 reimprime.
 
 ### 7.2 Largada
 Ao fim da seleção, o `modoAUTO` liga `largadaLiberada`, e a `irMonitorTask` passa a repassar os comandos para a `handleIRCommand`. **IR 1** → `ready` e LEDs vermelhos. **IR 2** → apaga os LEDs e notifica a `openingsTask`. Ela chama `resetFightingState()`, executa a iniciação (uma de `macros[]`, a Curva de Borda ou nada), marca `tempoFighting` e liga `running = true`.
@@ -159,6 +173,18 @@ Ao fim da seleção, o `modoAUTO` liga `largadaLiberada`, e a `irMonitorTask` pa
 - a `openingsTask` não liga `running` se o IR 3 chegou durante a iniciação;
 - a Curva de Borda sai da espera pela linha;
 - a `handleIRCommand` ignora um IR 2 posterior.
+
+**Gravador de luta:** a `openingsTask` chama `iniciarGravador()` logo antes de ligar `running`, então a iniciação não é gravada. A `analogSensorTask` grava na RAM (`gravAmostras[]`) os primeiros `GRAVADOR_DURACAO_MS` (30 s) a 100 Hz (`GRAVADOR_JANELA_MS` = 10 ms).
+- Cada amostra (12 B) guarda o **menor** ADC das linhas e do LDR, o **OU** dos sensores digitais na janela, o último PWM (`novaVE/novaVD`) e o estado da luta.
+- As mudanças de modo, flanco, linha, LDR, Carga Total e ataque por LDR vão para `gravEventos[]` com o tempo do ciclo.
+- A gravação termina aos 30 s ou no IR 3. São 36 KB de amostras mais 2 KB de eventos.
+- **Nada é gravado na flash durante a luta**, porque escrever nela desliga o cache dos dois núcleos.
+- **Rounds na flash:** depois do IR 3, já com os motores travados, a `stopRobot` chama `guardarRound()`, que copia a luta da RAM para um dos `ROUNDS_SLOTS` (5) slots de 40 KB na partição `spiffs` (que o firmware não usa), pela API `esp_partition_*`. Cada slot tem um cabeçalho `CabecalhoRound` com o número do round, a configuração da luta e CRC. O cabeçalho é gravado por último, então um slot interrompido fica inválido. O round 1 é a primeira luta desde a última limpeza. Com os slots cheios, o round novo sobrescreve o mais antigo. A gravação é em pedaços com `vTaskDelay`, por causa do watchdog. Ela não acontece sem IR 3, então uma luta desligada antes dele se perde. O `pio run -t upload` não apaga os rounds, mas o `erase` apaga. Ao conectar o BT, o AUTO avisa o número que a próxima luta vai receber (`avisarRounds()`). **Isso não é multi-round:** o robô continua parado para sempre depois do IR 3. Os rounds só sobrevivem ao reinício.
+- No fim da seleção de luta, o `modoAUTO` não volta: fica em `aguardarExportacaoLuta()`. `d` pelo Serial (em qualquer modo) ou pelo BT (só nessa espera, depois do IR 3) imprime todos os rounds em CSV no mesmo canal (`exportarRounds()`), do mais antigo ao mais novo, entre `#ROUNDS,N` e `#ROUNDS_FIM,N`. Cada round é um bloco `#LUTA_INICIO` (com `#round,N`), `#AMOSTRAS`, `#EVENTOS`, `#LUTA_FIM`. Se a luta não foi para a flash, ela sai da RAM como `#round,ram`. `l` (`limparRounds()`) apaga só os slots da última exportação desta sessão e responde `#LIMPOS,N`. Nenhum dos dois funciona com o robô pronto para lutar (`flashLiberada()`), e o `roundsMutex` impede que gravação, exportação e limpeza se cruzem.
+- Para exportar pela USB, o monitor serial não deve acionar DTR/RTS, senão o ESP reinicia. Os rounds da flash sobrevivem, mas uma luta que só estava na RAM se perde.
+- No PC, `tools/coletar_luta.py --porta COMx` (o `pyserial` vem em `tools/lib`) abre a porta sem DTR/RTS, envia o `d` e grava em `lutas/`, para cada round (`luta_<data>_rN_*`), a série (`*_amostras.csv`), os eventos (`*_eventos.csv`), o texto bruto e uma linha em `lutas.csv` com o round, a configuração, o resultado e o tipo perguntados no terminal e um resumo da luta. Depois de salvar tudo, envia `l` (`--manter` não envia). `--arquivo` lê uma exportação salva do terminal BT. A interface **Fuego Sumo Tool (FST)**, `tools/fst.py` (aberta pelo `tools/fst.bat`), reaproveita as funções do script e tem as abas Fuego, Guia (`tools/README.md`), Coleta (com resultado por round), Firmware, Dados, NVS e Configurações. A aba Firmware lê e grava o MAC mestre do controle PS4 pela USB (`tools/ps4_mac.py`, relatórios HID 0x12/0x13 do DS4 via `hid.dll`, comparado ao `FUEGO` de `rc_mode.hpp`), compila, grava e limpa a flash pelo PlatformIO da `penv` e faz commit e push numa branch escolhida (`tools/firmware.py`). Se o `FUEGO` mudar de formato, atualize o `PADRAO_MAC` do `ps4_mac.py`. Se o SixaxisPairTool trocou o driver do controle pelo libusb-win32, o controle some dos HIDs e o `ps4_mac.py` usa o `libusb0.dll`. As bibliotecas de terceiros ficam copiadas em `tools/lib` (pyserial e `libusb0.dll` x64/x86, com as licenças), e os scripts as carregam antes das instaladas no PC. Não adicione dependência que precise de `pip install`: copie para `tools/lib`.
+- **Comandos do Serial:** a `serialComandosTask` (núcleo 0, prioridade 1, criada no `setup()` por `setupSerialComandos()`) lê o Serial em qualquer modo. `d` exporta os rounds, `l` limpa os exportados e `c` imprime a tabela de configuração entre `#CONFIG_INICIO`/`#CONFIG_FIM` (`imprimirConfig()`: id, nome, chave, valor, padrão capturado no boot, se veio da NVS, mínimo e máximo). Durante a luta (`running`), ela só responde que está indisponível. O BT continua com o `d` e o `l` no `aguardarExportacaoLuta()`.
+- **Aba NVS:** `tools/config_nvs.py` lê essa tabela, acha a variável de cada chave em `PIN_CONFIG`/`THRESHOLD_CONFIG` e a inicialização dela nos headers (`tipo NOME = numero;`), e troca só o número ao aplicar. Uma variável configurável nova precisa seguir esse formato de definição para a ferramenta encontrá-la. Se o formato do `exportarLuta()` mudar, atualize o script.
 
 Só depois do freio a `stopRobot` acende os LEDs (`ledsParada()`) e imprime, para nada que possa bloquear vir antes. A trava também vale no IDLE, no RC e na personalizada. Os LEDs ficam vermelhos, e o AUTO avisa no BT ("ROBO TRAVADO PELO IR 3") ao conectar, ao fim da seleção e antes de executar uma personalizada.
 
@@ -222,6 +248,11 @@ Se o controle desconectar, os motores são freados.
 | `t_rrl`, `t_rgl`, `t_rrf`, `t_rgf` | int | Retorno: recuo e giro com linha lateral, recuo e giro com linha frontal (ms) |
 | `t_ce`, `t_cd` | int | Coeficiente de ré esquerdo e direito do RC (%) |
 | `t_ps` | int | Período do timer de leitura dos sensores (µs) |
+| `t_lq` | int | Queda relativa da linha (ADC) |
+
+Os **rounds** não ficam na NVS: ficam na partição `spiffs` (ver 7.2).
+
+O último **log de sensores** fica no namespace `fuego_log`: `n` (ushort, quantidade de amostras) e `d` (blob de `AmostraLog`). Ele só é gravado se a NVS tiver espaço, porque ocupa ~4,8 KB de uma partição de 20 KB.
 
 O padrão de cada item é o valor da variável no código. `carregarPinConfig()` guarda esse valor (`padraoPinos`/`padraoValores`) antes de aplicar a NVS. `salvarPinConfig()` grava só o que é diferente do padrão e **remove** a chave quando o valor volta ao padrão. Um valor salvo na NVS vale mais que o do código. Para um padrão novo do código valer, o item não pode estar salvo: ajuste-o pelo menu para o valor do código (isso apaga a chave) ou apague a flash. As seleções de estratégia do BT **não** são salvas, e precisam ser feitas de novo a cada boot.
 

@@ -20,7 +20,9 @@
 
 #pragma region PARAR ROBO
 
-// IR 3: freia primeiro, sinaliza depois. Nada que possa bloquear (LEDs, BT) vem antes do freio
+void guardarRound();                          // auto_mode.hpp
+
+// IR 3: freia primeiro, sinaliza depois. Nada que possa bloquear (LEDs, BT, flash) vem antes do freio
 void stopRobot(void *pvParameters) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     travarMotores();                          // roboParado + running = false + freio
@@ -28,6 +30,7 @@ void stopRobot(void *pvParameters) {
     ledsParada();                             // LED embutido aceso e enderecaveis vermelhos
     SerialBT.println("//=====//PAROU (IR 3): motores travados ate reiniciar//=====//");
     Serial.println("//=====//PAROU (IR 3): motores travados ate reiniciar//=====//");
+    guardarRound();                           // Luta da RAM para a flash, com os motores ja travados
 
     for (;;) {
         brakeMotors();                        // Reforca o freio a cada 1 s
@@ -114,7 +117,253 @@ mesmo nucleo da task que ela acorda, e o nucleo 1 fica so com o combate
 */
 void startTimer();
 
+// Detector de linha de um sensor: limiar absoluto OU queda relativa a referencia do preto, com
+// histerese na saida. A referencia so acompanha o sinal fora da linha
+struct DetectorLinha {
+    int32_t baseQ8 = -1;                      // Referencia do preto x256 (-1 = ainda sem leitura)
+    bool naLinha = false;
+};
+
+volatile int baseLinhaE = 0;                  // Referencia do preto, para o Teste de sensor
+volatile int baseLinhaD = 0;
+
+bool atualizarLinha(DetectorLinha& detector, int adc) {
+    if (detector.baseQ8 < 0) detector.baseQ8 = adc << 8;
+    int base = detector.baseQ8 >> 8;
+
+    int entrada = LINHA_TRESHOLD;
+    if (LINHA_QUEDA > 0 && base - LINHA_QUEDA > entrada) entrada = base - LINHA_QUEDA;
+
+    if (!detector.naLinha && adc < entrada) detector.naLinha = true;
+    else if (detector.naLinha && adc > entrada + LINHA_HISTERESE) detector.naLinha = false;
+
+    if (!detector.naLinha) detector.baseQ8 += ((adc << 8) - detector.baseQ8) >> LINHA_BASE_SHIFT;
+    return detector.naLinha;
+}
+
+// Menor e maior ADC desde iniciarExtremos(), para o Teste de sensor sugerir limiares
+volatile bool rastrearExtremos = false;
+volatile int extMinLinhaE, extMaxLinhaE, extMinLinhaD, extMaxLinhaD, extMinLdr, extMaxLdr;
+
+void iniciarExtremos() {
+    rastrearExtremos = false;
+    extMinLinhaE = extMinLinhaD = extMinLdr = 4095;
+    extMaxLinhaE = extMaxLinhaD = extMaxLdr = 0;
+    rastrearExtremos = true;
+}
+
+void atualizarExtremos(int linhaE, int linhaD, int ldr) {
+    if (linhaE < extMinLinhaE) extMinLinhaE = linhaE;
+    if (linhaE > extMaxLinhaE) extMaxLinhaE = linhaE;
+    if (linhaD < extMinLinhaD) extMinLinhaD = linhaD;
+    if (linhaD > extMaxLinhaD) extMaxLinhaD = linhaD;
+    if (ldr < extMinLdr) extMinLdr = ldr;
+    if (ldr > extMaxLdr) extMaxLdr = ldr;
+}
+
+/*
+!INFO | Log de sensores
+-----------------------------------
+Cada amostra guarda o MENOR valor de cada sensor numa janela de LOG_JANELA_MS: uma passada pela
+linha (~12 ms a 2 m/s) ou uma sombra no LDR nunca se perde, mesmo amostrando bem menos que o timer.
+Tamanho: LOG_AMOSTRAS x 6 bytes = 4,8 KB, que cabe na NVS junto da configuracao e das iniciacoes
+*/
+#define LOG_JANELA_MS          10             //  AUTO | Janela de cada amostra do log (ms)
+#define LOG_DURACAO_MS         8000           //  AUTO | Duracao do teste do log (ms)
+#define LOG_AMOSTRAS           (LOG_DURACAO_MS / LOG_JANELA_MS)
+
+struct AmostraLog {
+    uint16_t linhaE;
+    uint16_t linhaD;
+    uint16_t ldr;
+};
+
+AmostraLog logSensores[LOG_AMOSTRAS];
+volatile int logQtd = 0;
+volatile bool logAtivo = false;
+AmostraLog logJanela;
+int64_t logInicioJanelaUs = 0;
+
+void iniciarLog() {
+    logAtivo = false;
+    logQtd = 0;
+    logJanela = {0xFFFF, 0xFFFF, 0xFFFF};
+    logInicioJanelaUs = esp_timer_get_time();
+    logAtivo = true;                          // Por ultimo: a analogSensorTask (nucleo 0) ja grava
+}
+
+void registrarLog(int linhaE, int linhaD, int ldr) {
+    if (linhaE < logJanela.linhaE) logJanela.linhaE = linhaE;
+    if (linhaD < logJanela.linhaD) logJanela.linhaD = linhaD;
+    if (ldr < logJanela.ldr) logJanela.ldr = ldr;
+
+    int64_t agora = esp_timer_get_time();
+    if (agora - logInicioJanelaUs < LOG_JANELA_MS * 1000LL) return;
+
+    logSensores[logQtd++] = logJanela;
+    logJanela = {0xFFFF, 0xFFFF, 0xFFFF};
+    logInicioJanelaUs = agora;
+    if (logQtd >= LOG_AMOSTRAS) logAtivo = false;
+}
+
+/*
+!INFO | Gravador de luta
+-----------------------------------
+Grava os primeiros GRAVADOR_DURACAO_MS da luta (contados do fim da iniciacao) na RAM, para exportar
+em CSV depois do IR 3. Nada vai para a flash durante a luta: gravar nela desliga o cache dos dois
+nucleos. Cada amostra resume uma janela de GRAVADOR_JANELA_MS: o MENOR ADC das linhas e do LDR, o
+OU dos sensores digitais (viu pelo menos uma vez) e o ultimo PWM e estado da luta. As mudancas de
+estado entram numa lista de eventos com o tempo do ciclo em que aconteceram
+Tamanho: GRAVADOR_AMOSTRAS x 12 bytes = 36 KB, mais GRAVADOR_EVENTOS x 4 bytes = 2 KB
+*/
+#define GRAVADOR_JANELA_MS     10             //  AUTO | Janela de cada amostra da luta (ms)
+#define GRAVADOR_DURACAO_MS    30000          //  AUTO | Tempo de luta gravado (ms)
+#define GRAVADOR_AMOSTRAS      (GRAVADOR_DURACAO_MS / GRAVADOR_JANELA_MS)
+#define GRAVADOR_EVENTOS       512            //  AUTO | Maximo de eventos gravados
+
+// Bits do campo sensores da amostra
+#define SENS_JS_E              0x01
+#define SENS_IR_E              0x02
+#define SENS_IR_D              0x04
+#define SENS_JS_D              0x08
+#define SENS_LINHA_E           0x10
+#define SENS_LINHA_D           0x20
+#define SENS_LDR               0x40
+
+struct AmostraLuta {
+    uint16_t linhaE;                          // Menor ADC da janela
+    uint16_t linhaD;
+    uint16_t ldr;
+    int16_t pwmE;                             // Ultimo comando dos motores na janela
+    int16_t pwmD;
+    uint8_t sensores;                         // SENS_*: viu pelo menos uma vez na janela
+    uint8_t estado;                           // modoLuta (bits 0-2), estadoFlanco (3-5), cargaTotal (6), ldrAtacando (7)
+};
+
+enum TipoEvento : uint8_t {
+    evModo, evFlanco, evLinhaE, evLinhaD, evLdr, evCargaTotal, evLdrAtaque, evParada, evFim
+};
+
+struct EventoLuta {
+    uint16_t tMs;                             // Desde o inicio da luta
+    uint8_t tipo;                             // TipoEvento
+    uint8_t valor;                            // Novo valor
+};
+
+AmostraLuta gravAmostras[GRAVADOR_AMOSTRAS];
+EventoLuta gravEventos[GRAVADOR_EVENTOS];
+volatile int gravQtd = 0;
+volatile int gravEventosQtd = 0;
+volatile bool gravAtivo = false;
+volatile bool gravTerminou = false;           // Ha uma luta gravada para exportar
+ModoLuta gravModoInicial = buscaOfensiva;     // Movimentacao escolhida (modoLutaOriginal no inicio)
+AmostraLuta gravJanela;
+int64_t gravInicioUs = 0;
+int64_t gravFimJanelaUs = 0;
+uint8_t gravEstadoAnterior = 0;
+uint8_t gravSensoresAnterior = 0;
+
+uint8_t estadoLutaAtual() {
+    return (uint8_t)modoLuta | ((uint8_t)estadoFlanco << 3) | (cargaTotal << 6) | (ldrAtacando << 7);
+}
+
+void limparJanelaGravador() {
+    gravJanela = {0xFFFF, 0xFFFF, 0xFFFF, 0, 0, 0, 0};
+}
+
+void registrarEvento(int64_t agora, uint8_t tipo, uint8_t valor) {
+    if (gravEventosQtd >= GRAVADOR_EVENTOS) return;
+    gravEventos[gravEventosQtd++] = {(uint16_t)((agora - gravInicioUs) / 1000), tipo, valor};
+}
+
+// Chamada pela openingsTask (nucleo 1) logo antes de ligar running
+void iniciarGravador() {
+    gravAtivo = false;
+    gravQtd = 0;
+    gravEventosQtd = 0;
+    gravTerminou = false;
+    gravModoInicial = modoLutaOriginal;
+    limparJanelaGravador();
+    gravEstadoAnterior = estadoLutaAtual();
+    gravSensoresAnterior = 0;
+    gravInicioUs = esp_timer_get_time();
+    gravFimJanelaUs = gravInicioUs + GRAVADOR_JANELA_MS * 1000LL;
+    registrarEvento(gravInicioUs, evModo, modoLuta);
+    gravAtivo = true;                         // Por ultimo: a analogSensorTask (nucleo 0) ja grava
+}
+
+void encerrarGravador(int64_t agora, uint8_t motivo) {
+    registrarEvento(agora, motivo, 0);
+    gravTerminou = true;
+    gravAtivo = false;
+}
+
+void registrarGravador(int linhaE, int linhaD, int ldr) {
+    int64_t agora = esp_timer_get_time();
+    if (roboParado) {
+        encerrarGravador(agora, evParada);
+        return;
+    }
+
+    // Fecha a janela. O fim avanca de um em um periodo para o tempo da amostra nao acumular atraso
+    if (agora >= gravFimJanelaUs) {
+        gravJanela.pwmE = novaVE;
+        gravJanela.pwmD = novaVD;
+        gravJanela.estado = estadoLutaAtual();
+        gravAmostras[gravQtd++] = gravJanela;
+        limparJanelaGravador();
+        gravFimJanelaUs += GRAVADOR_JANELA_MS * 1000LL;
+        if (gravQtd >= GRAVADOR_AMOSTRAS) {
+            encerrarGravador(agora, evFim);
+            return;
+        }
+    }
+
+    uint8_t sensores = (value_JS_E  ? SENS_JS_E    : 0) | (value_IR_E  ? SENS_IR_E    : 0) |
+                       (value_IR_D  ? SENS_IR_D    : 0) | (value_JS_D  ? SENS_JS_D    : 0) |
+                       (value_QRE_E ? SENS_LINHA_E : 0) | (value_QRE_D ? SENS_LINHA_D : 0) |
+                       (value_LDR   ? SENS_LDR     : 0);
+    gravJanela.sensores |= sensores;
+    if (linhaE < gravJanela.linhaE) gravJanela.linhaE = linhaE;
+    if (linhaD < gravJanela.linhaD) gravJanela.linhaD = linhaD;
+    if (ldr < gravJanela.ldr) gravJanela.ldr = ldr;
+
+    uint8_t estado = estadoLutaAtual();
+    uint8_t mudouEstado = estado ^ gravEstadoAnterior;
+    if (mudouEstado & 0x07) registrarEvento(agora, evModo, estado & 0x07);
+    if (mudouEstado & 0x38) registrarEvento(agora, evFlanco, (estado >> 3) & 0x07);
+    if (mudouEstado & 0x40) registrarEvento(agora, evCargaTotal, (estado >> 6) & 1);
+    if (mudouEstado & 0x80) registrarEvento(agora, evLdrAtaque, (estado >> 7) & 1);
+
+    uint8_t mudouSensores = sensores ^ gravSensoresAnterior;
+    if (mudouSensores & SENS_LINHA_E) registrarEvento(agora, evLinhaE, (sensores & SENS_LINHA_E) != 0);
+    if (mudouSensores & SENS_LINHA_D) registrarEvento(agora, evLinhaD, (sensores & SENS_LINHA_D) != 0);
+    if (mudouSensores & SENS_LDR)     registrarEvento(agora, evLdr, (sensores & SENS_LDR) != 0);
+
+    gravEstadoAnterior = estado;
+    gravSensoresAnterior = sensores;
+}
+
+// Diferenca minima entre preto e branco (ou claro e escuro) para valer sugerir um limiar
+#define CONTRASTE_MINIMO       200
+
+// Um limiar para as duas linhas: no meio entre o branco mais alto e o preto mais baixo dos dois
+// sensores. Devolve -1 se nao houve contraste suficiente (ex.: um sensor nunca viu a linha)
+int sugerirLimiarLinha(int brancoE, int pretoE, int brancoD, int pretoD) {
+    int branco = max(brancoE, brancoD);
+    int preto = min(pretoE, pretoD);
+    if (preto - branco < CONTRASTE_MINIMO) return -1;
+    return (branco + preto) / 2;
+}
+
+// LDR: no meio entre a sombra (escuro) e a luz ambiente (claro). -1 se nao houve sombra
+int sugerirLimiarLdr(int escuro, int claro) {
+    if (claro - escuro < CONTRASTE_MINIMO) return -1;
+    return (escuro + claro) / 2;
+}
+
 void analogSensorTask(void *pvParameters) {
+    DetectorLinha detectorE, detectorD;
     adc1_channel_t canalLinhaE = (adc1_channel_t)digitalPinToAnalogChannel(LINHA_ESQ_PIN);
     adc1_channel_t canalLinhaD = (adc1_channel_t)digitalPinToAnalogChannel(LINHA_DIR_PIN);
     adc1_channel_t canalLdr    = (adc1_channel_t)digitalPinToAnalogChannel(LDR_PIN);
@@ -153,9 +402,15 @@ void analogSensorTask(void *pvParameters) {
         adc_QRE_D = linhaD;
         adc_LDR = ldrFiltrado;
 
-        value_QRE_E = linhaE < LINHA_TRESHOLD;
-        value_QRE_D = linhaD < LINHA_TRESHOLD;
+        value_QRE_E = atualizarLinha(detectorE, linhaE);
+        value_QRE_D = atualizarLinha(detectorD, linhaD);
+        baseLinhaE = detectorE.baseQ8 >> 8;
+        baseLinhaD = detectorD.baseQ8 >> 8;
         value_LDR = ldrFiltrado < LDR_TRESHOLD;
+
+        if (rastrearExtremos) atualizarExtremos(linhaE, linhaD, ldrFiltrado);
+        if (logAtivo) registrarLog(linhaE, linhaD, ldrFiltrado);
+        if (gravAtivo) registrarGravador(linhaE, linhaD, ldrFiltrado);
 
         // Com as leituras deste ciclo prontas, acorda a logica de combate (so durante a luta)
         if (running) xTaskNotifyGive(fightingLogicHandle);
@@ -318,7 +573,7 @@ void setupSensorTask() {
     xTaskCreatePinnedToCore(                  // Parar o robo
         stopRobot,                            // Funcao da tarefa
         "StopRobot",                          // Nome da tarefa
-        256 * 16,                             // Tamanho da pilha
+        256 * 24,                             // Tamanho da pilha (guardarRound le os cabecalhos na pilha)
         nullptr,                              // Parametros
         17,                                   // Prioridade 17: a maior das tasks do projeto
         &stopRobotHandle,                     // Handle
