@@ -20,7 +20,7 @@ RAIZ = Path(__file__).resolve().parent.parent
 TEMPO_CONFIG_S = 4                            # Espera pelo #CONFIG_FIM depois do 'c'
 
 RE_ENTRADA = re.compile(r'\{\s*"[^"]*"\s*,\s*&(\w+)\s*,\s*"(\w+)"')
-TIPOS_C = r"(?:int|uint8_t|uint16_t|int16_t|int32_t|long)"
+TIPOS_C = r"(?:unsigned\s+long|unsigned\s+int|unsigned|int|uint8_t|uint16_t|int16_t|int32_t|long)"
 
 
 def ler_config_serial(porta, baud):
@@ -72,7 +72,7 @@ def _arquivos_codigo(raiz):
 
 def _regex_definicao(variavel):
     # Ex.: "int LINHA_QUEDA                = 300;   // comentario"
-    return re.compile(rf"^(\s*(?:static\s+|volatile\s+)*{TIPOS_C}\s+{re.escape(variavel)}\s*=\s*)(-?\d+)(;)(\s*)(.*)$")
+    return re.compile(rf"^(\s*(?:static\s+|volatile\s+|const\s+)*{TIPOS_C}\s+{re.escape(variavel)}\s*=\s*)(-?\d+)(;)(\s*)(.*)$")
 
 
 def mapear_codigo(raiz=RAIZ):

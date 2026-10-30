@@ -47,7 +47,7 @@ A ferramenta abre com uma introdução de 7 s na própria janela:
 
 Um clique ou ESC pula a introdução. Ela pode ser desligada na aba **Configurações**.
 
-A janela tem sete abas e uma barra de progresso:
+A janela tem oito abas e uma barra de progresso:
 
 | Parte | Função |
 |---|---|
@@ -55,6 +55,7 @@ A janela tem sete abas e uma barra de progresso:
 | **Guia** | Mostra este documento |
 | **Coleta** | Coleta os rounds e grava o resultado. Veja o passo a passo abaixo |
 | **Firmware** | Controle PS4, compilar, gravar e limpar a flash do robô e commit no GitHub. Veja a seção "Aba Firmware" |
+| **Parâmetros** | Edita no código os parâmetros das FSMs de luta e os itens da NVS. Veja a seção "Aba Parâmetros" |
 | **Dados** | Mostra em tabela os CSVs da pasta de lutas. Veja os detalhes abaixo |
 | **NVS** | Mostra a configuração do robô (pinos e parâmetros) ao lado dos valores do código e copia os valores do robô para o código |
 | **Configurações** | **Modo noturno** (padrão), **Animação de abertura** (ligada por padrão) e **Abertura em degradê**, do amarelo ao vermelho (padrão; desligada, a arte fica só vermelha). **Imagem da aba Fuego** (ASCII do robô, foto ou foto tratada) e **Imagem da abertura** (ASCII do Fuego do `main.cpp`, ASCII do robô, foto ou foto tratada). Quando a abertura mostra o robô, o nome "Fuego" da ASCII art do `main.cpp` aparece embaixo dele. **Ver a abertura agora** mostra a introdução de novo. As opções ficam em `tools/preferencias.json`, fora do git |
@@ -135,6 +136,20 @@ A ferramenta usa o PlatformIO da extensão do VS Code (`~/.platformio/penv`). Ne
 4. **Commitar:** mostra os arquivos e pede confirmação. Depois adiciona **todos** os arquivos alterados (`git add -A`, respeitando o `.gitignore`), faz o commit e, com **Enviar para o GitHub** marcado, envia (`git push -u origin <branch>`).
 
 Na primeira vez, o Windows pode abrir a janela de login do GitHub.
+
+## Aba Parâmetros
+
+Edita no código os valores de ajuste sem abrir os arquivos. A tabela mostra:
+- **Parâmetros das FSMs de luta:** todo o bloco "PARÂMETROS DE AJUSTE" do `include/fighting.hpp` (velocidades, tempos e limiares de cada busca, do Retorno e do Desengate), agrupado pelas seções do próprio arquivo. Um parâmetro novo no bloco aparece sozinho, desde que siga o formato `tipo nome = numero;`.
+- **Configuráveis pela NVS (outros arquivos):** os pinos e os parâmetros do menu de Configuração que ficam fora do `fighting.hpp` (servo, LDR, asa, período dos sensores, ré do RC).
+
+Como usar:
+1. Dê **dois cliques** (ou ENTER) numa linha e digite o valor novo. ENTER confirma e ESC cancela.
+2. O valor é conferido na hora: velocidades de 0 a 255, tempos sem valor negativo e itens da NVS na faixa do menu de Configuração. As linhas alteradas ficam **amarelas**.
+3. **Aplicar no código** mostra a lista do que muda e troca **só o número** de cada linha, mantendo o comentário alinhado. **Descartar alterações** desfaz o que ainda não foi aplicado.
+4. Compile e grave na aba **Firmware** para os valores valerem no robô.
+
+> ⚠️ Nos itens da NVS (coluna NVS preenchida), um valor salvo no robô vale mais que o do código. Para o valor novo do código valer, ajuste o item pelo menu de Configuração ou limpe a flash.
 
 
 ## Passo a passo (terminal)

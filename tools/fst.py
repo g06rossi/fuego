@@ -8,6 +8,7 @@ Abas:
                salva com o resultado e limpa os rounds do robo
   Firmware     MAC mestre do controle PS4, compilacao, gravacao e limpeza da flash do robo e commit
                no GitHub, com log
+  Parametros   edita no codigo os parametros das FSMs de luta (fighting.hpp) e os itens da NVS
   Dados        tabelas dos CSVs da pasta de lutas (lutas.csv e as series de cada luta)
   NVS          configuracao do robo (pinos e parametros) e aplicacao dos valores no codigo
   Configuracoes modo noturno, abertura em degrade e animacao de abertura
@@ -32,6 +33,7 @@ from tkinter import filedialog, messagebox, ttk
 
 import coletar_luta as coleta
 import firmware
+import parametros
 import ps4_mac
 import config_nvs
 
@@ -183,6 +185,7 @@ class App:
         self.aba_guia = ttk.Frame(abas)
         self.aba_ferramentas = ttk.Frame(abas)
         self.aba_firmware = ttk.Frame(abas)
+        self.aba_parametros = ttk.Frame(abas)
         self.aba_dados = ttk.Frame(abas)
         self.aba_nvs = ttk.Frame(abas)
         self.aba_config = ttk.Frame(abas)
@@ -190,6 +193,7 @@ class App:
         abas.add(self.aba_guia, text="Guia")
         abas.add(self.aba_ferramentas, text="Coleta")
         abas.add(self.aba_firmware, text="Firmware")
+        abas.add(self.aba_parametros, text="Parametros")
         abas.add(self.aba_dados, text="Dados")
         abas.add(self.aba_nvs, text="NVS")
         abas.add(self.aba_config, text="Configuracoes")
@@ -198,6 +202,7 @@ class App:
         self.montar_guia()
         self.montar_ferramentas()
         self.montar_firmware()
+        self.montar_parametros()
         self.montar_dados()
         self.montar_nvs()
         self.montar_config()
@@ -214,6 +219,9 @@ class App:
 
     def fechar(self):
         if self.execucao and not messagebox.askyesno(NOME_FERRAMENTA, "Ha uma operacao em andamento. Cancelar e sair?"):
+            return
+        if self.pendentes and not messagebox.askyesno(
+                NOME_FERRAMENTA, f"{len(self.pendentes)} parametro(s) alterado(s) e nao aplicado(s) ao codigo. Sair assim mesmo?"):
             return
         if self.execucao:
             self.execucao.cancelar()
@@ -287,6 +295,8 @@ class App:
         self.guia.tag_config("citacao", background=c["citacao"])
         self.tabela_nvs.tag_configure("diferente", background=c["diferente"])
         self.tabela_nvs.tag_configure("aviso", background=c["alerta"])
+        self.tabela_param.tag_configure("diferente", background=c["diferente"])
+        self.tabela_param.tag_configure("grupo", foreground=c["aviso"])
         self.log_fw.tag_config("saida", foreground=c["sutil"])
         self.log_fw.tag_config("etapa", foreground=c["texto"])
         self.log_fw.tag_config("erro", foreground=c["erro"])
@@ -1043,6 +1053,176 @@ class App:
             self.raiz.after(100, self.atualizar_git)
 
         self.executar_firmware(f"Commit na branch {branch}", trabalho, depois)
+
+#=========================================//Parametros//========================================//
+
+    def montar_parametros(self):
+        aba = self.aba_parametros
+        topo = ttk.Frame(aba, padding=6)
+        topo.pack(fill="x")
+        self.botao_aplicar_param = ttk.Button(topo, text="Aplicar no codigo", command=self.aplicar_parametros)
+        self.botao_aplicar_param.pack(side="left")
+        ttk.Button(topo, text="Descartar alteracoes", command=self.descartar_parametros).pack(side="left", padx=6)
+        ttk.Button(topo, text="Recarregar codigo", command=self.recarregar_parametros).pack(side="left")
+        self.resumo_param = ttk.Label(topo, text="", style="Dica.TLabel")
+        self.resumo_param.pack(side="left", padx=16)
+
+        colunas = [("codigo", "Codigo", 80), ("novo", "Novo valor", 90), ("faixa", "Faixa", 90),
+                   ("nvs", "NVS", 50), ("comentario", "Comentario", 380), ("local", "Local", 130)]
+        quadro = ttk.Frame(aba)
+        quadro.pack(fill="both", expand=True, padx=6)
+        self.tabela_param = ttk.Treeview(quadro, show="tree headings", columns=[c[0] for c in colunas])
+        self.tabela_param.heading("#0", text="Parametro")
+        self.tabela_param.column("#0", width=260, minwidth=120)
+        for coluna, titulo, largura in colunas:
+            self.tabela_param.heading(coluna, text=titulo)
+            self.tabela_param.column(coluna, width=largura, minwidth=40, stretch=(coluna == "comentario"))
+        rolagem = ttk.Scrollbar(quadro, orient="vertical", command=self.tabela_param.yview)
+        self.tabela_param.config(yscrollcommand=rolagem.set)
+        self.tabela_param.pack(side="left", fill="both", expand=True)
+        rolagem.pack(side="right", fill="y")
+        self.tabela_param.bind("<Double-1>", self.editar_parametro)
+        self.tabela_param.bind("<Return>", self.editar_parametro)
+
+        ttk.Label(aba, padding=6, style="Dica.TLabel", justify="left", text=(
+            "Dois cliques (ou ENTER) na linha para digitar o valor novo; ENTER confirma e ESC cancela. Amarelo: alterado, "
+            "ainda nao aplicado.\nAplicar troca so o numero no codigo. Depois, compile e grave na aba Firmware. "
+            "Itens da NVS: um valor salvo no robo vale mais que o do codigo.")).pack(fill="x")
+
+        self.parametros = {}                  # iid -> parametro
+        self.pendentes = {}                   # iid -> valor novo
+        self.editor_param = None
+        self.recarregar_parametros()
+
+    def recarregar_parametros(self):
+        if self.pendentes and not messagebox.askyesno("Parametros", "Descartar as alteracoes nao aplicadas?"):
+            return
+        self.fechar_editor_parametro()
+        self.pendentes = {}
+        self.parametros = {}
+        abertos = {self.tabela_param.item(g, "text") for g in self.tabela_param.get_children()
+                   if self.tabela_param.item(g, "open")}
+        self.tabela_param.delete(*self.tabela_param.get_children())
+        try:
+            lista = parametros.ler_parametros()
+        except OSError as erro:
+            self.resumo_param.config(text=f"Nao foi possivel ler o codigo: {erro}")
+            return
+
+        grupos = {}
+        for i, p in enumerate(lista):
+            if p["grupo"] not in grupos:
+                grupos[p["grupo"]] = self.tabela_param.insert(
+                    "", "end", text=p["grupo"], open=(p["grupo"] in abertos or not abertos), tags=("grupo",))
+            iid = f"p{i}"
+            self.parametros[iid] = p
+            minimo, maximo = parametros.faixa(p)
+            texto_faixa = "" if minimo is None and maximo is None else \
+                f"{'' if minimo is None else minimo}..{'' if maximo is None else maximo}"
+            self.tabela_param.insert(grupos[p["grupo"]], "end", iid=iid, text=p["variavel"], values=(
+                p["valor"], "", texto_faixa, p["nvs"]["chave"] if p["nvs"] else "", p["comentario"],
+                f"{p['arquivo'].name}:{p['linha']}"))
+        self.atualizar_resumo_param(len(lista))
+
+    def atualizar_resumo_param(self, total=None):
+        total = total if total is not None else len(self.parametros)
+        self.resumo_param.config(text=f"{total} parametros | {len(self.pendentes)} alterado(s), nao aplicado(s)")
+
+    def editar_parametro(self, evento):
+        if evento.type == tk.EventType.KeyPress:
+            iid = self.tabela_param.focus()
+        else:
+            iid = self.tabela_param.identify_row(evento.y)
+        if iid not in self.parametros:
+            return
+        self.fechar_editor_parametro()
+        self.tabela_param.see(iid)
+        self.tabela_param.update_idletasks()
+        caixa = self.tabela_param.bbox(iid, "novo")
+        if not caixa:
+            return
+        x, y, largura, altura = caixa
+        editor = ttk.Entry(self.tabela_param)
+        editor.insert(0, str(self.pendentes.get(iid, self.parametros[iid]["valor"])))
+        editor.select_range(0, "end")
+        editor.place(x=x, y=y, width=largura, height=altura)
+        editor.focus_set()
+        editor.bind("<Return>", lambda _: self.confirmar_parametro(iid))
+        editor.bind("<KP_Enter>", lambda _: self.confirmar_parametro(iid))
+        editor.bind("<Escape>", lambda _: self.fechar_editor_parametro())
+        editor.bind("<FocusOut>", lambda _: self.confirmar_parametro(iid, silencioso=True))
+        self.editor_param = editor
+
+    def fechar_editor_parametro(self):
+        if self.editor_param:
+            editor, self.editor_param = self.editor_param, None
+            editor.destroy()
+
+    def confirmar_parametro(self, iid, silencioso=False):
+        if not self.editor_param:
+            return
+        texto = self.editor_param.get()
+        p = self.parametros[iid]
+        try:
+            valor = parametros.validar(p, texto)
+        except ValueError as erro:
+            if silencioso:
+                self.fechar_editor_parametro()
+                self.definir_status(f"Valor ignorado: {erro}")
+            else:
+                messagebox.showwarning("Parametros", str(erro))
+                self.editor_param.focus_set()
+            return
+        self.fechar_editor_parametro()
+        if valor == p["valor"]:
+            self.pendentes.pop(iid, None)
+            self.tabela_param.set(iid, "novo", "")
+            self.tabela_param.item(iid, tags=())
+        else:
+            self.pendentes[iid] = valor
+            self.tabela_param.set(iid, "novo", valor)
+            self.tabela_param.item(iid, tags=("diferente",))
+        self.atualizar_resumo_param()
+        self.tabela_param.focus_set()
+        self.tabela_param.focus(iid)
+        self.tabela_param.selection_set(iid)
+
+    def descartar_parametros(self):
+        if not self.pendentes:
+            return
+        if messagebox.askyesno("Parametros", f"Descartar {len(self.pendentes)} alteracao(oes)?"):
+            self.pendentes = {}
+            self.recarregar_parametros()
+
+    def aplicar_parametros(self):
+        self.fechar_editor_parametro()
+        if not self.pendentes:
+            messagebox.showinfo("Parametros", "Nenhum valor alterado. De dois cliques numa linha para editar")
+            return
+        alteracoes = [(self.parametros[iid], valor) for iid, valor in self.pendentes.items()]
+        previa = "\n".join(f"{p['variavel']}: {p['valor']} -> {novo}  ({p['arquivo'].name}:{p['linha']})"
+                           for p, novo in alteracoes)
+        da_nvs = [p["variavel"] for p, _ in alteracoes if p["nvs"]]
+        aviso = ("\n\nConfiguraveis pela NVS: " + ", ".join(da_nvs) + ". Se o robo tiver um valor salvo deles, "
+                 "o salvo continua valendo (ajuste pelo menu de Configuracao ou limpe a flash).") if da_nvs else ""
+        if not messagebox.askyesno("Parametros", f"Trocar no codigo:\n\n{previa}{aviso}\n\nContinuar?"):
+            return
+        try:
+            feitas = parametros.aplicar(alteracoes)
+        except (coleta.ErroColeta, OSError) as erro:
+            self.pendentes = {}
+            self.recarregar_parametros()
+            messagebox.showerror("Parametros", f"{erro}\nNada foi alterado neste arquivo. Os valores foram recarregados")
+            return
+        for descricao in feitas:
+            self.registrar(f"Codigo alterado: {descricao}")
+            self.registrar_fw(f"Codigo alterado: {descricao}", "etapa")
+        self.pendentes = {}
+        self.recarregar_parametros()
+        self.recarregar_codigo()              # A aba NVS mostra os mesmos valores do codigo
+        self.definir_status(f"{len(feitas)} parametro(s) aplicados ao codigo. Compile e grave na aba Firmware", 100)
+        messagebox.showinfo("Parametros", f"{len(feitas)} valor(es) aplicados ao codigo.\n"
+                                          "Compile e grave o firmware na aba Firmware para valerem no robo.")
 
 #===========================================//Dados//===========================================//
 
